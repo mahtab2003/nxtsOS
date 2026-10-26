@@ -1,4 +1,4 @@
-/* Load nxtsOS's GDT and reload CS/DS/SS. */
+/* Load nxtsOS's GDT, reload CS/DS/SS, and load the task register. */
 .global gdt_flush
 .extern gdt_ptr
 gdt_flush:
@@ -11,5 +11,7 @@ reload_cs:
     mov %ax, %fs
     mov %ax, %gs
     mov %ax, %ss
+    mov $0x28, %ax
+    ltr %ax
     ret
 .section .note.GNU-stack,"",@progbits

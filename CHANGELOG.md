@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.2.0 — Phase 3: paging, processes, syscalls, scheduler
+
+- Paging: identity-mapped kernel region (0-32 MB), per-process page
+  directories sharing the kernel entries, user code at 0x08048000 and
+  user stack at 0x0C000000, page 0 left unmapped.
+- Own GDT extended with user code/data (0x18/0x20) and a TSS (0x28);
+  ring-3 -> ring-0 transitions switch to a per-process kernel stack.
+- Syscalls via int 0x80: print, yield, exit, getpid, ticks. Print
+  pointers are validated against the process's mapped pages first.
+- Scheduler: round-robin over two ring-3 test processes, cooperative
+  yield plus 100 ms timer preemption (proven: P1 iter 1 prints during
+  P2's busy loop, before P2 iter 1).
+- Bug fixed during testing: after a yield/exit/preempt the scheduler
+  returned with IF cleared, so the shell's hlt loop never woke for
+  keyboard input. run_process() now re-enables interrupts on return.
+- Known limitation: exited processes' frames (page directories, tables,
+  code/stack pages) are not freed yet — process teardown is later work.
+  After the two test processes exit, PMM used rises from 267 to 297 frames.
+
+# Changelog
+
 ## 0.1.1 — QEMU-verified bugfix (no new features)
 
 - FIX: kernel installs its own GDT (code 0x08, data 0x10) before interrupts.

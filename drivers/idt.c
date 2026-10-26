@@ -3,6 +3,7 @@
 #include "pit.h"
 #include "keyboard.h"
 #include "../kernel/panic.h"
+#include "../kernel/proc.h"
 
 struct idt_entry {
     u16 base_lo, sel;
@@ -34,6 +35,7 @@ extern void irq6(void);  extern void irq7(void);  extern void irq8(void);
 extern void irq9(void);  extern void irq10(void); extern void irq11(void);
 extern void irq12(void); extern void irq13(void); extern void irq14(void);
 extern void irq15(void);
+extern void syscall_stub(void);
 
 static void idt_set_gate(u8 num, u32 base, u16 sel, u8 flags) {
     idt[num].base_lo = (u16)(base & 0xFFFF);
@@ -55,6 +57,8 @@ void idt_init(void) {
         irq8, irq9, irq10, irq11, irq12, irq13, irq14, irq15 };
     for (int i = 0; i < 32; i++) idt_set_gate((u8)i, (u32)isrs[i], 0x08, 0x8E);
     for (int i = 0; i < 16; i++) idt_set_gate((u8)(32 + i), (u32)irqs[i], 0x08, 0x8E);
+    /* Syscall gate, DPL 3 so user mode can call int 0x80. */
+    idt_set_gate(0x80, (u32)syscall_stub, 0x08, 0xEE);
     __asm__ volatile ("lidt %0" : : "m"(idtp));
 }
 
@@ -62,12 +66,26 @@ void isr_handler(struct regs *r) {
     if (r->int_no < 32) {
         console_printf("\nEXCEPTION %u err=0x%x eip=0x%x\n",
                        r->int_no, r->err_code, r->eip);
+        if (r->int_no == 14) {
+            u32 cr2;
+            __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
+            console_printf("PAGE FAULT at 0x%x\n", cr2);
+        }
         panic("unhandled CPU exception");
     }
 }
 
 void irq_handler(struct regs *r) {
-    if (r->int_no == 0) timer_tick();
-    else if (r->int_no == 1) keyboard_irq_handler();
-    pic_send_eoi((u8)r->int_no);
+    if (r->int_no == 0) {
+        timer_tick();
+        pic_send_eoi(0);
+        /* EOI first, then preempt: the switch abandons this IRQ frame,
+           so the PIC must already be told the IRQ is done. */
+        timer_maybe_preempt(r);
+    } else if (r->int_no == 1) {
+        keyboard_irq_handler();
+        pic_send_eoi(1);
+    } else {
+        pic_send_eoi((u8)r->int_no);
+    }
 }
