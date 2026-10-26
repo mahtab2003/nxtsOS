@@ -33,9 +33,14 @@ qemu-system-x86_64 -cdrom build/nxtsOS.iso -boot d -m 128 \
   -serial file:logs/serial.log -display default
 ```
 
-Type `help` at the `nxts> ` prompt. Try `ls`, `cat hello.txt`,
-`write note.txt hello`, `ls`, `reboot`, then `cat note.txt` — the file
-survives the reboot. `reboot` restarts the guest.
+After boot, two built-in test programs run first and print `P1 iter` /
+`P2 iter` lines — wait a few seconds and the `nxts> ` prompt appears
+(the kernel now prints "The nxts> shell prompt will appear when they
+finish" so this is not mistaken for a stuck test run; keys typed early
+are buffered). Type `help` at the `nxts> ` prompt. Try `ls`,
+`cat hello.txt`, `write note.txt hello`, `ls`, `reboot`, then
+`cat note.txt` — the file survives the reboot. `reboot` restarts the
+guest.
 Stop the VM by closing the QEMU window (or Ctrl-Alt-Q).
 
 ## VirtualBox

@@ -4,58 +4,71 @@ An original, ultra-lightweight desktop operating system, built from scratch.
 Not a Linux distribution, not a fork, not a re-themed desktop: nxtsOS boots
 its own kernel.
 
-## Status — v0.2.0 (Phase 3 complete, NOT a desktop yet)
+## Status — v0.3.1 (Phase 4 complete, NOT a desktop yet)
 
-What actually works in v0.2.0, verified by booting the real ISO in QEMU:
+What actually works in v0.3.1, verified by booting the real ISO in QEMU:
 
-- Multiboot boot path (GRUB), 32-bit x86 kernel written from scratch
+- Multiboot boot path (GRUB), 32-bit x86 kernel written from scratch.
+  The GRUB menu version is now generated from the `VERSION` file at
+  build time, so it cannot go stale again (v0.3.0's menu still said
+  v0.2.0 — fixed in v0.3.1).
 - VGA text console + serial (COM1) diagnostic log
 - Multiboot memory-map parsing and a bitmap physical-memory manager
-- IDT, remapped PIC, PIT timer ticks, PS/2 keyboard input
-- A tiny in-kernel shell: `help`, `mem`, `ticks`, `clear`, `reboot`
+- IDT, remapped PIC, PIT timer ticks, PS/2 keyboard input (buffered:
+  keys typed before the shell appears are not lost)
+- Paging, ring-3 user processes, int 0x80 syscalls, round-robin
+  scheduler with yield + 100 ms timer preemption, process teardown
+  (exited processes' frames are freed)
+- ATA PIO disk driver, VFS + nxtsFS filesystem (persistent files that
+  survive a guest reboot), host disk tool `tools/mkdisk.py`
+- A tiny in-kernel shell: `help`, `mem`, `ticks`, `clear`, `reboot`,
+  `fs`, `ls`, `cat <file>`, `write <file> <text>`, `rm <file>`
 - Kernel panic path for unhandled exceptions (prints registers, halts)
 
-What is NOT in v0.1.0 — do not mistake this release for it:
+What is NOT in v0.3.1 — do not mistake this release for it:
 
 - No graphical desktop, window manager, or GUI applications yet
-- No filesystem / persistent storage yet
+- No ELF loader from disk, users/login/sessions, or package management yet
 - No networking yet
-- No user processes, syscalls, or privilege separation yet (kernel runs in ring 0)
 - No installer
 
-Those are Phases 3–9 in `docs/ROADMAP.md`. Each phase lands only when it
-boots and is tested in QEMU the same way v0.1.1 was.
+Those are Phases 5–11 in `docs/ROADMAP.md`. Each phase lands only when it
+boots and is tested in QEMU, with an adversarial security test, before release.
 
 ## Quick start (QEMU)
 
 ```sh
 ./scripts/build.sh
+python3 tools/mkdisk.py build/nxtsOS-disk.img --add hello.txt:/path/to/hello.txt
 ./scripts/run_qemu.sh          # 128 MB RAM, VGA + serial log to logs/serial.log
-./scripts/run_qemu.sh 256      # 256 MB RAM
+./scripts/run_qemu.sh 32       # 32 MB RAM also works (tested)
 ```
 
-In the VM, type `help` at the `nxts> ` prompt. Press Ctrl-Alt-Q in the
-QEMU window (or close it) to stop the VM.
+After boot, two built-in test programs run first and print `P1 iter` /
+`P2 iter` lines — those are the startup programs, not a stuck test run.
+Wait a few seconds and the `nxts> ` prompt appears; type `help` there.
+Press Ctrl-Alt-Q in the QEMU window (or close it) to stop the VM.
 
 Full instructions, tested configuration, and known issues:
-`docs/VM_GUIDE.md`, `docs/BUILD_AND_TEST.md`, `releases/v0.1.0/TEST_REPORT.md`.
+`docs/VM_GUIDE.md`, `docs/BUILD_AND_TEST.md`, `releases/v0.3.0/TEST_REPORT.md`.
 
 **v0.1.0 warning:** v0.1.0 rebooted in a loop in QEMU (wrong GDT selectors
-— see `releases/v0.1.1/TEST_REPORT.md`). Do not use v0.1.0; use v0.2.0.
-QEMU tests: `./scripts/test_boot.sh` and `tests/qemu_test_user.py` — PASS.
+— see `releases/v0.1.1/TEST_REPORT.md`). Do not use v0.1.0; use v0.3.1.
+QEMU tests: `./scripts/test_boot.sh` and `tests/qemu_test_storage.py` — PASS.
 
 ## Project layout
 
 - `boot/` — Multiboot entry (GAS assembly), linker script
-- `kernel/` — kernel main, console, shell, panic
-- `drivers/` — VGA, serial, PIC, PIT, keyboard
-- `mm/` — physical memory manager
-- `fs/`, `net/`, `graphics/`, `window_manager/`, `desktop/`,
+- `kernel/` — kernel main, console, shell, panic, processes, syscalls
+- `drivers/` — VGA, serial, PIC, PIT, keyboard, ATA disk
+- `mm/` — physical memory manager, paging
+- `fs/` — VFS + nxtsFS filesystem
+- `net/`, `graphics/`, `window_manager/`, `desktop/`,
   `system_services/`, `applications/`, `sdk/` — placeholders for later phases,
   each with a `STATUS.md` stating what is (not) implemented
-- `tests/` — host-side checks + QEMU boot test script
+- `tests/` — host-side checks + QEMU boot/persistence/security test scripts
 - `scripts/` — build, run, and packaging scripts
-- `releases/v0.1.0/` — manifest, checksums, test report for this version
+- `releases/v0.3.0/` — manifest, checksums, test + security reports
 - `archives/` — versioned source and distribution archives
 
 ## Build requirements
@@ -64,7 +77,7 @@ Host: Linux x86_64, `gcc` (with `-m32` freestanding support), GNU `as`/`ld`,
 `grub-mkrescue` + `xorriso` (for the ISO), `qemu-system-x86_64` (for testing),
 `python3`, `git`, `tar`, `zip`, `sha256sum`.
 
-No cross-compiler is required for v0.1.0: the kernel is built freestanding
+No cross-compiler is required: the kernel is built freestanding
 with the host GCC (`-ffreestanding -nostdlib -m32`).
 
 ## Licence
