@@ -234,4 +234,14 @@ with test + security reports exists in `releases/`.
   running before the shell are not mistaken for a stuck run. Verified
   at 32 MB (the reported configuration) and 128 MB.
 
-Current release: **v0.4.0 = end of Phase 5**. Next: **Phase 6, Task 6.1 (package format)**.
+## v0.4.1 — v0.4.0 limits fix (2026-10-26) — DONE
+- Stronger password hash (10000 iterations, random salts, breaking change),
+  background jobs (`runbg`/`jobs`/`kill`, logout cleanup), persistent
+  brute-force lockout (`fails.txt`, root `unlock`), 30-minute idle lock
+  with `lock` command, fast time-based startup test (~1.5 s, preemption
+  proof kept). QEMU: v0.4.1 test, Phase 5 regression, security 3/3,
+  persistent-lockout, base, and 32 MB storage all PASS.
+- NOT in v0.4.1: disk encryption (needs a full AES + key-management
+  phase; a fake XOR was deliberately not added).
+
+Current release: **v0.4.1 = end of Phase 5 + limits fix**. Next: **Phase 6, Task 6.1 (package format)** — or disk encryption as a dedicated phase, if the user chooses it.

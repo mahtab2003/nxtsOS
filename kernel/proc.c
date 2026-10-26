@@ -45,6 +45,82 @@ static void run_process(struct proc *p) {
 
 static u8 exec_kernel_stack[8192];
 
+/* Background jobs. Each slot has its own kernel stack, so a job's
+   ring-0 stack is never shared with the shell's exec stack. A job is
+   READY when the shell is running; RUNNING only while run_process()
+   is inside it. Timer preemption and yield both return to the caller
+   (shell idle loop) with state READY, so the shell stays responsive. */
+struct bg_job { struct proc p; char name[32]; int used; u8 stack[8192]; };
+static struct bg_job bg_jobs[MAX_BG];
+
+int proc_bg_count(void) {
+    int n = 0;
+    for (int i = 0; i < MAX_BG; i++) if (bg_jobs[i].used) n++;
+    return n;
+}
+int proc_bg_start(const char *name, u32 uid) {
+    for (int i = 0; i < MAX_BG; i++) {
+        if (bg_jobs[i].used) continue;
+        if (elf_create_proc(name, uid, &bg_jobs[i].p) != 0) return -1;
+        bg_jobs[i].p.pid = 10u + (u32)i;
+        bg_jobs[i].p.kernel_stack_top = (u32)&bg_jobs[i].stack[8192];
+        memset(bg_jobs[i].name, 0, sizeof(bg_jobs[i].name));
+        u32 j = 0;
+        while (name[j] && j < 31) { bg_jobs[i].name[j] = name[j]; j++; }
+        bg_jobs[i].used = 1;
+        console_printf("Background job %s started (pid %u, uid %u)\n",
+                       bg_jobs[i].name, bg_jobs[i].p.pid, uid);
+        return 0;
+    }
+    return -1; /* job table full */
+}
+void proc_bg_tick(void) {
+    for (int i = 0; i < MAX_BG; i++) {
+        if (!bg_jobs[i].used || bg_jobs[i].p.state != PROC_READY) continue;
+        run_process(&bg_jobs[i].p);
+        if (bg_jobs[i].p.state == PROC_EXITED) {
+            console_printf("\nBackground job %s (pid %u) finished\n",
+                           bg_jobs[i].name, bg_jobs[i].p.pid);
+            vmm_destroy_pd(bg_jobs[i].p.pd);
+            bg_jobs[i].p.pd = 0;
+            bg_jobs[i].used = 0;
+        }
+    }
+}
+int proc_bg_list(void) {
+    int n = 0;
+    for (int i = 0; i < MAX_BG; i++) {
+        if (!bg_jobs[i].used) continue;
+        console_printf("pid %u  %s  uid %u\n", bg_jobs[i].p.pid, bg_jobs[i].name, bg_jobs[i].p.uid);
+        n++;
+    }
+    if (n == 0) console_write("(no background jobs)\n");
+    return n;
+}
+int proc_bg_kill(u32 pid, u32 uid) {
+    for (int i = 0; i < MAX_BG; i++) {
+        if (!bg_jobs[i].used || bg_jobs[i].p.pid != pid) continue;
+        if (uid != 0 && bg_jobs[i].p.uid != uid) return -1; /* not yours */
+        vmm_destroy_pd(bg_jobs[i].p.pd);
+        bg_jobs[i].p.pd = 0;
+        bg_jobs[i].used = 0;
+        console_printf("Killed background job pid %u\n", pid);
+        return 0;
+    }
+    return -1;
+}
+int proc_bg_kill_for_uid(u32 uid) {
+    int n = 0;
+    for (int i = 0; i < MAX_BG; i++) {
+        if (!bg_jobs[i].used || bg_jobs[i].p.uid != uid) continue;
+        vmm_destroy_pd(bg_jobs[i].p.pd);
+        bg_jobs[i].p.pd = 0;
+        bg_jobs[i].used = 0;
+        n++;
+    }
+    return n;
+}
+
 int proc_exec_file(const char *name, u32 uid) {
     /* Run a single ELF program to completion, in the shell's context.
        Yield/preemption return here with state READY, so loop until

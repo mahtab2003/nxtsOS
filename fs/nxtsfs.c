@@ -65,7 +65,11 @@ static int valid_entry(struct dir_entry *e) {
 }
 
 static int is_system_file(const char *name) {
-    return strcmp(name, "users.txt") == 0 || strcmp(name, "audit.log") == 0;
+    /* fails.txt holds persistent per-user failed-login counts (v0.4.1);
+       like users.txt/audit.log it must never be created or written by
+       a non-root user, or the brute-force lockout could be cleared. */
+    return strcmp(name, "users.txt") == 0 || strcmp(name, "audit.log") == 0
+        || strcmp(name, "fails.txt") == 0;
 }
 static int can_read_entry(struct dir_entry *e, u32 uid) {
     if (uid == 0) return 1;

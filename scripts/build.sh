@@ -24,7 +24,11 @@ gcc -m32 -ffreestanding -O0 -Wall -Wextra -fno-stack-protector -fno-pic -fno-pie
     -c userland/evil.c -o build/evil_main.o
 gcc -m32 -no-pie -Wl,--build-id=none -T userland/linker.ld -nostdlib \
     -o build/evil.elf build/user_start.o build/evil_main.o
-ls -l build/hello.elf build/evil.elf
+gcc -m32 -ffreestanding -O0 -Wall -Wextra -fno-stack-protector -fno-pic -fno-pie -no-pie -nostdlib \
+    -c userland/slow.c -o build/slow_main.o
+gcc -m32 -no-pie -Wl,--build-id=none -T userland/linker.ld -nostdlib \
+    -o build/slow.elf build/user_start.o build/slow_main.o
+ls -l build/hello.elf build/evil.elf build/slow.elf
 echo "--- compiling kernel ---"
 gcc $CFLAGS -c boot/boot.S -o build/boot.o
 gcc $CFLAGS -c drivers/isr.S -o build/isr.o

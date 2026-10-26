@@ -1,17 +1,26 @@
 #!/usr/bin/env python3
 """Generate a nxtsOS users.txt file (see docs/SECURITY.md).
 Usage: mkuser.py OUTPUT --user NAME:UID:PASSWORD[:SALT] ...
-The password hash is FNV-1a over salt+password, matching kernel/users.c.
-It stops passwords being stored in plaintext; it is NOT a production
-password hash (no work factor) — see the kernel comment and release notes.
+The password hash is salted FNV-1a iterated 10000 times, matching
+kernel/users.c exactly (v0.4.1, BREAKING change vs v0.4.0 single-round
+hashes — regenerate old users.txt files). It is still NOT a production
+KDF (no memory hardness) — see the kernel comment and release notes.
+If SALT is omitted, a random 8-hex-char salt is generated, so two
+users with the same password do not get the same hash.
 """
-import argparse, sys
+import argparse, sys, os
 
-def fnv(salt, password):
-    h = 2166136261
-    for b in (salt.encode() + password.encode()):
+def _fnv_step(h, data):
+    for b in data:
         h ^= b
         h = (h * 16777619) & 0xFFFFFFFF
+    return h
+
+def fnv(salt, password):
+    h = _fnv_step(2166136261, salt.encode() + password.encode())
+    for _ in range(10000):
+        buf = salt.encode()[:16] + bytes([h & 0xFF, (h >> 8) & 0xFF, (h >> 16) & 0xFF, (h >> 24) & 0xFF])
+        h = _fnv_step(2166136261, buf)
     return h
 
 def main():
@@ -25,7 +34,7 @@ def main():
         if len(parts) not in (3, 4):
             sys.exit(f"bad --user {spec!r}, expected NAME:UID:PASSWORD[:SALT]")
         name, uid_s, password = parts[0], parts[1], parts[2]
-        salt = parts[3] if len(parts) == 4 else name
+        salt = parts[3] if len(parts) == 4 else os.urandom(4).hex()
         if not name or len(name) > 31 or ":" in name or len(salt) > 15 or not (1 <= len(password) <= 64):
             sys.exit(f"bad user spec {spec!r}")
         try:

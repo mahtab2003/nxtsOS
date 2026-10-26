@@ -11,18 +11,35 @@ struct user_rec {
 static struct user_rec users[MAX_USERS];
 static int user_count = 0;
 
-/* FNV-1a, 32-bit. This is a fast, unsalted-slow-hash-free checksum-style
-   hash: it stops passwords being stored in plaintext on disk, but it is
-   NOT a production password hash (no bcrypt/scrypt/Argon2, no work
-   factor). An attacker who can read the disk can brute-force short
-   passwords offline. That limit is documented in docs/SECURITY.md and
-   in the v0.4.0 release notes — it is not claimed to be stronger. */
+/* v0.4.1 password hash: salted FNV-1a iterated 10000 times.
+   The work factor makes each guess ~10000x more expensive than the
+   v0.4.0 single-round hash, so short passwords are no longer trivially
+   brute-forceable offline. It is still NOT a production KDF: it has no
+   memory hardness (no bcrypt/scrypt/Argon2), so a well-resourced
+   attacker with the disk can still brute-force weak passwords, just
+   much more slowly. That limit is documented in docs/SECURITY.md.
+   BREAKING CHANGE vs v0.4.0: single-round hashes will not match.
+   Regenerate users.txt with the updated tools/mkuser.py.
+   The iteration count must match mkuser.py exactly. */
+#define USERS_HASH_ITERATIONS 10000
+static u32 fnv_step(u32 h, const u8 *data, u32 len) {
+    for (u32 i = 0; i < len; i++) { h ^= data[i]; h *= 16777619u; }
+    return h;
+}
 u32 users_hash(const char *salt, const char *password) {
     u32 h = 2166136261u;
-    const char *p = salt;
-    while (*p) { h ^= (u8)*p++; h *= 16777619u; }
-    p = password;
-    while (*p) { h ^= (u8)*p++; h *= 16777619u; }
+    h = fnv_step(h, (const u8 *)salt, strlen(salt));
+    h = fnv_step(h, (const u8 *)password, strlen(password));
+    for (int i = 0; i < USERS_HASH_ITERATIONS; i++) {
+        u8 buf[24];
+        u32 j = 0;
+        const char *p = salt;
+        while (*p && j < 16) buf[j++] = (u8)*p++;
+        buf[j++] = (u8)(h & 0xFF); buf[j++] = (u8)((h >> 8) & 0xFF);
+        buf[j++] = (u8)((h >> 16) & 0xFF); buf[j++] = (u8)((h >> 24) & 0xFF);
+        h = 2166136261u;
+        h = fnv_step(h, buf, j);
+    }
     return h;
 }
 
@@ -106,6 +123,7 @@ int users_load(void) {
 }
 
 int users_check(const char *name, const char *password, u32 *uid_out) {
+    if (!password || password[0] == 0) return 0; /* empty passwords never match */
     for (int i = 0; i < user_count; i++) {
         if (strcmp(users[i].name, name) == 0) {
             if (users_hash(users[i].salt, password) == users[i].hash) {

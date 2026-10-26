@@ -25,6 +25,16 @@ extern int proc_count;
 
 void proc_init(void);
 int  proc_exec_file(const char *name, u32 uid); /* run an ELF to completion */
+/* Background jobs (v0.4.1): an ELF started with runbg stays READY and is
+   resumed from the shell's idle loop, so the prompt returns immediately
+   and the program runs concurrently with shell input. */
+#define MAX_BG 4
+int  proc_bg_start(const char *name, u32 uid); /* 0 ok, -1 fail; prints start */
+void proc_bg_tick(void);   /* run each READY job once (yield/preempt returns) */
+int  proc_bg_list(void);   /* prints jobs, returns count */
+int  proc_bg_kill(u32 pid, u32 uid); /* 0 ok, -1 no such job / no permission */
+int  proc_bg_kill_for_uid(u32 uid);  /* logout cleanup, returns count killed */
+int  proc_bg_count(void);
 void proc_save_from_regs(struct proc *p, struct regs *r);
 void scheduler_run(void);
 void timer_maybe_preempt(struct regs *r);
