@@ -15,15 +15,19 @@ tar --exclude=./build --exclude=./archives --exclude=./logs --exclude=./.git \
 # above, so copy it back in explicitly (it is documentation, not a build).
 mkdir -p "/tmp/nxtsOS-src-$VER/releases/v$VER"
 cp "releases/v$VER/MANIFEST.md" "releases/v$VER/TEST_REPORT.md" \
+   "releases/v$VER/SECURITY_REPORT.md" \
    "/tmp/nxtsOS-src-$VER/releases/v$VER/" 2>/dev/null || true
 (cd /tmp && tar czf "$OLDPWD/archives/code/nxtsOS-v$VER-source.tar.gz" "nxtsOS-src-$VER")
 # Distribution archive
 rm -rf "/tmp/nxtsOS-dist-$VER"
 mkdir -p "/tmp/nxtsOS-dist-$VER"
 cp build/nxtsOS.iso "/tmp/nxtsOS-dist-$VER/"
+[ -f build/nxtsOS-disk.img ] && cp build/nxtsOS-disk.img "/tmp/nxtsOS-dist-$VER/"
 cp scripts/run_qemu.sh "/tmp/nxtsOS-dist-$VER/"
+cp tools/mkdisk.py "/tmp/nxtsOS-dist-$VER/" 2>/dev/null || true
 cp docs/VM_GUIDE.md docs/BUILD_AND_TEST.md "/tmp/nxtsOS-dist-$VER/"
 cp "releases/v$VER/MANIFEST.md" "releases/v$VER/TEST_REPORT.md" "/tmp/nxtsOS-dist-$VER/"
+[ -f "releases/v$VER/SECURITY_REPORT.md" ] && cp "releases/v$VER/SECURITY_REPORT.md" "/tmp/nxtsOS-dist-$VER/"
 cp README.md VERSION "/tmp/nxtsOS-dist-$VER/"
 (cd /tmp/nxtsOS-dist-$VER && sha256sum nxtsOS.iso > SHA256SUMS)
 (cd /tmp && zip -qr "$OLDPWD/archives/dist/nxtsOS-v$VER-dist.zip" "nxtsOS-dist-$VER")

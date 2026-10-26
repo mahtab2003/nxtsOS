@@ -25,6 +25,14 @@ void *memset(void *dst, int val, u32 n) {
     return dst;
 }
 
+int memcmp(const void *a, const void *b, u32 n) {
+    const u8 *x = (const u8 *)a, *y = (const u8 *)b;
+    for (u32 i = 0; i < n; i++) {
+        if (x[i] != y[i]) return (int)x[i] - (int)y[i];
+    }
+    return 0;
+}
+
 void *memcpy(void *dst, const void *src, u32 n) {
     u8 *d = (u8 *)dst;
     const u8 *s = (const u8 *)src;

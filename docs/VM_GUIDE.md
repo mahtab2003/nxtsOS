@@ -1,45 +1,58 @@
-# VM Guide — nxtsOS v0.1.0
+# VM Guide — nxtsOS v0.3.0
 
-## Tested configuration (v0.1.0)
+## Tested configuration (v0.3.0)
 
 - Emulator: QEMU (qemu-system-x86_64), machine `pc` (i440FX), CPU default
 - RAM to test: **128 MB** (64 MB as a secondary run)
-- **QEMU test status (v0.2.0): PASS** — see `releases/v0.2.0/TEST_REPORT.md`.
-  Booted at 128 MB and 64 MB; user processes run and interleave, then the
-  shell prompt appears and monitor-typed `help`/`mem` work.
+- **QEMU test status (v0.3.0): PASS** — see `releases/v0.3.0/TEST_REPORT.md`.
+  Booted at 128 MB and 64 MB; user processes run and interleave, the
+  filesystem mounts, and a file written before a guest reboot is read
+  back after it.
 - Display: VGA text mode 80x25 (no graphics mode yet)
 - Input: PS/2 keyboard (QEMU default)
-- Storage: none required for v0.1.0 (ISO boots from CD; no disk, no persistence)
-- Network: none in v0.1.0 (not implemented)
+- Storage: nxtsFS disk image (16 MiB, `build/nxtsOS-disk.img`), attached
+  as IDE primary master. Without a disk, the kernel still boots and the
+  shell works; `fs`/`ls`/`cat`/`write`/`rm` report "no filesystem".
+- Network: none in v0.3.0 (not implemented)
 - Serial: COM1 captured to `logs/serial.log` by the launch scripts
 
 ## Run it
 
 ```sh
+python3 tools/mkdisk.py build/nxtsOS-disk.img --add hello.txt:/path/to/hello.txt
 ./scripts/run_qemu.sh        # 128 MB, windowed, serial -> logs/serial.log
 ./scripts/run_qemu.sh 256    # override RAM in MB
 ```
 
-Or manually:
+`run_qemu.sh` attaches `build/nxtsOS-disk.img` automatically when it
+exists. Or manually:
 
 ```sh
 qemu-system-x86_64 -cdrom build/nxtsOS.iso -boot d -m 128 \
+  -drive file=build/nxtsOS-disk.img,format=raw,if=ide,index=0 \
   -serial file:logs/serial.log -display default
 ```
 
-Type `help` at the `nxts> ` prompt. `reboot` restarts the guest.
+Type `help` at the `nxts> ` prompt. Try `ls`, `cat hello.txt`,
+`write note.txt hello`, `ls`, `reboot`, then `cat note.txt` — the file
+survives the reboot. `reboot` restarts the guest.
 Stop the VM by closing the QEMU window (or Ctrl-Alt-Q).
 
 ## VirtualBox
 
-Not tested for v0.1.0. The ISO is a standard El Torito bootable image and
+Not tested for v0.3.0. The ISO is a standard El Torito bootable image and
 should boot in VirtualBox as a CD image, but that claim is untested and
 therefore not made as a supported configuration. QEMU is the supported path.
 
-## Known issues (v0.1.0)
+## Known issues (v0.3.0)
 
-- No graphics mode, no mouse, no disk, no network, no user processes.
+- No graphics mode, no mouse, no network, no user login yet.
+- Files have owner/mode recorded, but enforcement for non-root users
+  does not exist yet — there are no users yet (Phase 5). Until then,
+  filesystem access is via the kernel shell only (trusted, UID 0);
+  user processes have no filesystem syscalls in this release.
 - Keyboard is US layout, PS/2 set 1 only; some keys (e.g. arrows) are ignored.
-- The shell runs in the kernel; there is no privilege separation yet.
+- The kernel never formats a disk on its own; a disk with no valid
+  nxtsFS is reported, not wiped. Format only with `tools/mkdisk.py`.
 - Reboot uses the keyboard-controller reset line; on some VM configs it
   may instead require closing the VM window.
