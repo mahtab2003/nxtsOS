@@ -8,8 +8,10 @@ static u32 *fb = 0; /* virtual address FB_VIRT, 32bpp pixels */
 /* Diagnostics for `fbinfo`: what GRUB actually passed, so a "no
    framebuffer" report can be diagnosed instead of guessed at. */
 static const char *diag_reason = "not parsed";
+static const char *parse_reason = "not parsed";
 static int diag_bpp = -1, diag_type = -1;
 const char *fb_diag_reason(void) { return diag_reason; }
+const char *fb_parse_reason(void) { return parse_reason; }
 int fb_diag_bpp(void) { return diag_bpp; }
 int fb_diag_type(void) { return diag_type; }
 
@@ -28,7 +30,7 @@ u32 fb_phys_addr(void) { return phys; }
 static int parsed = 0;
 int fb_parse(u32 mbi_addr) {
     u32 *mbi = (u32 *)mbi_addr;
-    if ((mbi[0] & (1u << 12)) == 0) { diag_reason = "GRUB passed no framebuffer info (flag 12 clear)"; return -1; }
+    if ((mbi[0] & (1u << 12)) == 0) { diag_reason = "GRUB passed no framebuffer info (flag 12 clear)"; parse_reason = diag_reason; return -1; }
     /* Multiboot info: framebuffer_addr is u64 at byte offset 88
        (VBE fields are 2 bytes each, so the framebuffer section
        starts 4 bytes earlier than a naive 4-byte-per-field count
@@ -43,11 +45,11 @@ int fb_parse(u32 mbi_addr) {
     u32 h = (u32)b[104] | ((u32)b[105] << 8) | ((u32)b[106] << 16) | ((u32)b[107] << 24);
     u8 bpp = b[108], type = b[109];
     diag_bpp = (int)bpp; diag_type = (int)type;
-    if (fb_hi != 0 || fb_lo == 0 || (fb_lo & 0xFFF) != 0) { diag_reason = "framebuffer address invalid (high word set, zero, or unaligned)"; return -1; }
-    if (bpp != 32 || type != 1) { diag_reason = "unsupported mode (only 32bpp RGB, type 1, is supported)"; return -1; }
-    if (w == 0 || h == 0 || w > 4096 || h > 4096 || p < w * 4) { diag_reason = "invalid dimensions or pitch"; return -1; }
+    if (fb_hi != 0 || fb_lo == 0 || (fb_lo & 0xFFF) != 0) { diag_reason = "framebuffer address invalid (high word set, zero, or unaligned)"; parse_reason = diag_reason; return -1; }
+    if (bpp != 32 || type != 1) { diag_reason = "unsupported mode (only 32bpp RGB, type 1, is supported)"; parse_reason = diag_reason; return -1; }
+    if (w == 0 || h == 0 || w > 4096 || h > 4096 || p < w * 4) { diag_reason = "invalid dimensions or pitch"; parse_reason = diag_reason; return -1; }
     phys = fb_lo; pitch = p; width = w; height = h;
-    parsed = 1; diag_reason = "ok";
+    parsed = 1; diag_reason = "ok"; parse_reason = "ok";
     return 0;
 }
 
@@ -85,7 +87,19 @@ int fb_vbe_try(void) {
         bar = b0 & 0xFFFFFFF0u;
         if (bar != 0) break;
     }
-    if (bar == 0) { diag_reason = "VBE fallback: no PCI display BAR found"; return -1; }
+    if (bar == 0) {
+        /* Bochs with an ISA (non-PCI) VGA card, which is the default
+           when no PCI VGA slot is configured: OSDev documents the
+           linear framebuffer at the fixed address 0xE0000000 in
+           that case ("modern versions will use that address when
+           emulating ISA-only systems"). This is only reached after
+           the Bochs VBE ID check passed, so a Bochs VBE device is
+           definitely present, and the address is verified by a
+           write/read test pixel after mapping (see fb_verify in
+           main.c) — a wrong address fails verification and falls
+           back to text mode, it does not corrupt memory. */
+        bar = 0xE0000000u;
+    }
     vbe_write(1, 800); vbe_write(2, 600); vbe_write(3, 32);
     vbe_write(6, 800); vbe_write(7, 600);
     vbe_write(4, 0x41); /* enabled + linear framebuffer, clear memory */

@@ -132,6 +132,7 @@ static void fails_clear(const char *name) {
 static int read_line(char *buf, u32 max, int echo) {
     u32 len = 0;
     for (;;) {
+        keyboard_poll();
         int c = keyboard_getchar();
         if (c < 0) { __asm__ volatile ("hlt"); continue; }
         if (c == '\n') { console_putchar('\n'); buf[len] = 0; return (int)len; }
@@ -504,6 +505,10 @@ static int shell_loop(void) {
         console_printf("%s@nxts> ", session_name);
         len = 0;
         for (;;) {
+            /* Poll as well as IRQ: if IRQ1 is lost in some Bochs
+               setup, keys typed after the prompt still arrive via
+               the timer wakeup (see keyboard_poll). */
+            keyboard_poll();
             int c = keyboard_getchar();
             if (c < 0) {
                 /* Background jobs run here, while the shell waits for

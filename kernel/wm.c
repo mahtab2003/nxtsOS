@@ -267,7 +267,9 @@ static int wm_run_internal(int autotest) {
             }
             if (step >= 7) mouse_test_set(32, 588, 0);
         }
-        /* Keyboard: only a focused text field consumes keys. */
+        /* Keyboard: only a focused text field consumes keys. Poll
+           as well as IRQ, same Bochs robustness reason as shell. */
+        keyboard_poll();
         int c = keyboard_getchar();
         if (c >= 0) {
             int fi = -1;

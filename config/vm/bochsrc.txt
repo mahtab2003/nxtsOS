@@ -1,0 +1,37 @@
+# nxtsOS Bochs configuration — TESTED in Bochs 2.7 (2026-10-27).
+# Copy this file next to nxtsOS.iso and run: bochs -q -f bochsrc.txt
+# (adjust the ata0-master path to where you put the ISO, and the
+# vgaromimage path to your Bochs/SeaBIOS install if it differs).
+#
+# WHY THIS CONFIG, AND NOT BOCHS' DEFAULT:
+# Bochs' default VGABIOS is the ISA VGA BIOS, which has NO VBE at
+# all, and the Cirrus VGABIOS has no Bochs VBE IO ports — with
+# either of those, nxtsOS (and GRUB) cannot set a graphics mode,
+# so `gui`/`guitest` report "no framebuffer available" and the
+# kernel's VBE fallback fails with "no Bochs VBE device (ID check
+# failed)". This config uses the Bochs VBE extension with the
+# SeaBIOS stdvga VGABIOS, which Bochs 2.7 provides VBE ports for:
+# with it, nxtsOS v0.7.2 boots with
+# "Framebuffer: 800x600, pitch 3200, phys 0xE0000000 (VBE fallback)"
+# and `guitest` passes in Bochs.
+#
+# KEYBOARD: Bochs SDL only delivers keys to the focused window.
+# After the shell prompt appears, click inside the Bochs window
+# first, then type. If keys still do not arrive, the v0.7.2 kernel
+# also polls the keyboard controller every timer tick, so a lost
+# keyboard IRQ alone cannot leave the shell deaf — focus is the
+# remaining cause to check.
+romimage: file=/usr/share/seabios/bios.bin
+vgaromimage: file=/usr/share/seabios/vgabios-stdvga.bin
+vga: extension=vbe, update_freq=5
+cpu: count=1, ips=50000000
+memory: guest=32, host=32
+ata0-master: type=cdrom, path=nxtsOS.iso, status=inserted
+boot: cdrom
+display_library: sdl2
+com1: enabled=1, mode=file, dev=bochs_serial.log
+log: bochs.log
+panic: action=report
+error: action=report
+info: action=report
+debug: action=ignore

@@ -5,4 +5,5 @@ void keyboard_init(void);
 void keyboard_irq_handler(void);
 int  keyboard_getchar(void); /* -1 if no key waiting */
 void keyboard_flush(void); /* discard buffered keys (login/lock/logout) */
+void keyboard_poll(void); /* pick up a pending key without IRQ1 (Bochs robustness) */
 #endif
