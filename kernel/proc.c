@@ -1,4 +1,5 @@
 #include "proc.h"
+#include "elf.h"
 #include "console.h"
 #include "../mm/vmm.h"
 #include "../drivers/gdt.h"
@@ -42,12 +43,33 @@ static void run_process(struct proc *p) {
     __asm__ volatile ("sti");
 }
 
+static u8 exec_kernel_stack[8192];
+
+int proc_exec_file(const char *name, u32 uid) {
+    /* Run a single ELF program to completion, in the shell's context.
+       Yield/preemption return here with state READY, so loop until
+       the program exits; then free its address space. */
+    static struct proc exec_proc;
+    if (elf_create_proc(name, uid, &exec_proc) != 0) return -1;
+    exec_proc.pid = 3;
+    exec_proc.kernel_stack_top = (u32)&exec_kernel_stack[8192];
+    console_printf("Running %s (pid %u, uid %u)...\n", name, exec_proc.pid, uid);
+    do {
+        run_process(&exec_proc);
+    } while (exec_proc.state == PROC_READY);
+    vmm_destroy_pd(exec_proc.pd);
+    exec_proc.pd = 0;
+    console_printf("Program %s finished\n", name);
+    return 0;
+}
+
 void proc_init(void) {
     u32 blob_size = (u32)(user_prog_blob_end - user_prog_blob);
     console_printf("User program blob: %u bytes\n", blob_size);
     for (int i = 0; i < 2; i++) {
         struct proc *p = &procs[proc_count];
         p->pid = (u32)(proc_count + 1);
+        p->uid = 0;
         p->state = PROC_READY;
         p->pd = vmm_create_pd();
         p->code_pages = vmm_map_user(p->pd, user_prog_blob, blob_size);

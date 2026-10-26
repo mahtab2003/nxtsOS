@@ -10,6 +10,7 @@
 
 struct proc {
     u32 pid;
+    u32 uid;
     int state;
     u32 pd;
     u32 kernel_stack_top;
@@ -23,6 +24,7 @@ extern struct proc procs[MAX_PROCS];
 extern int proc_count;
 
 void proc_init(void);
+int  proc_exec_file(const char *name, u32 uid); /* run an ELF to completion */
 void proc_save_from_regs(struct proc *p, struct regs *r);
 void scheduler_run(void);
 void timer_maybe_preempt(struct regs *r);
