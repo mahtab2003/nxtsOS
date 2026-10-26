@@ -3,6 +3,7 @@
 #include "panic.h"
 #include "shell.h"
 #include "proc.h"
+#include "enc.h"
 #include "../mm/pmm.h"
 #include "../mm/vmm.h"
 #include "../drivers/gdt.h"
@@ -26,7 +27,7 @@ void kmain(u32 magic, u32 mbi_addr) {
     serial_init();
     console_init();
     console_write("nxtsOS kernel starting\n");
-    console_write("nxtsOS v0.5.0 - original kernel, Multiboot boot\n");
+    console_write("nxtsOS v0.6.0 - original kernel, Multiboot boot\n");
     if (magic != 0x2BADB002) panic("bad Multiboot magic");
     struct multiboot_info *mbi = (struct multiboot_info *)mbi_addr;
     console_printf("Multiboot: mem_lower=%uK mem_upper=%uK mmap_len=%u\n",
@@ -45,6 +46,14 @@ void kmain(u32 magic, u32 mbi_addr) {
     keyboard_init();
     __asm__ volatile ("sti");
     console_write("Interrupts enabled\n");
+    /* Disk encryption unlock, before any filesystem access: an
+       encrypted disk needs its passphrase first, or the filesystem
+       mount would read ciphertext as a superblock. Unencrypted
+       disks and no disk return immediately, with no prompt. */
+    if (enc_unlock() != 0)
+        console_write("Disk encryption: header invalid, disk will not mount\n");
+    else if (enc_enabled())
+        console_write("Disk encryption: AES-256-CTR enabled\n");
     int fs_rc = fs_mount();
     if (fs_rc == 0) {
         console_write("Filesystem mounted\n");

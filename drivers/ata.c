@@ -1,4 +1,5 @@
 #include "ata.h"
+#include "../kernel/enc.h"
 
 #define ATA_DATA     0x1F0
 #define ATA_SECTORS  0x1F2
@@ -50,7 +51,7 @@ static int ata_select(u32 lba) {
     return 0;
 }
 
-int ata_read_sector(u32 lba, u8 *buf) {
+int ata_read_sector_raw(u32 lba, u8 *buf) {
     if (ata_select(lba) != 0) return -1;
     outb(ATA_CMD, 0x20);
     if (ata_wait_drq() != 0) return -1;
@@ -59,7 +60,7 @@ int ata_read_sector(u32 lba, u8 *buf) {
     return 0;
 }
 
-int ata_write_sector(u32 lba, const u8 *buf) {
+int ata_write_sector_raw(u32 lba, const u8 *buf) {
     if (ata_select(lba) != 0) return -1;
     outb(ATA_CMD, 0x30);
     if (ata_wait_drq() != 0) return -1;
@@ -68,4 +69,22 @@ int ata_write_sector(u32 lba, const u8 *buf) {
     outb(ATA_CMD, 0xE7); /* cache flush */
     if (ata_wait_ready() != 0) return -1;
     return 0;
+}
+
+int ata_read_sector(u32 lba, u8 *buf) {
+    if (!enc_enabled()) return ata_read_sector_raw(lba, buf);
+    /* Encrypted: logical L is physical L+1, CTR-decrypted. */
+    u8 cipher[512];
+    if (ata_read_sector_raw(lba + 1, cipher) != 0) return -1;
+    enc_sector_crypt(lba, cipher, buf);
+    return 0;
+}
+
+int ata_write_sector(u32 lba, const u8 *buf) {
+    if (!enc_enabled()) return ata_write_sector_raw(lba, buf);
+    /* Encrypt into a temporary buffer so the caller's buffer is
+       never modified in place (callers reuse their buffers). */
+    static u8 cipher[512];
+    enc_sector_crypt(lba, buf, cipher);
+    return ata_write_sector_raw(lba + 1, cipher);
 }

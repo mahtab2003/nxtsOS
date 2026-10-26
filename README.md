@@ -4,9 +4,9 @@ An original, ultra-lightweight desktop operating system, built from scratch.
 Not a Linux distribution, not a fork, not a re-themed desktop: nxtsOS boots
 its own kernel.
 
-## Status — v0.5.0 (Phase 6 package management, NOT a desktop yet)
+## Status — v0.6.0 (Disk encryption, NOT a desktop yet)
 
-What actually works in v0.5.0, verified by booting the real ISO in QEMU:
+What actually works in v0.6.0, verified by booting the real ISO in QEMU:
 
 - Multiboot boot path (GRUB), 32-bit x86 kernel written from scratch.
   The GRUB menu version is now generated from the `VERSION` file at
@@ -27,6 +27,12 @@ What actually works in v0.5.0, verified by booting the real ISO in QEMU:
   `unlock <user>`, `whoami`, `logout`
 - ELF loader from disk, users/permissions, text login with sessions
   and an audit log (see `docs/SECURITY.md` for the honest limits)
+- Disk encryption (AES-256-CTR, boot passphrase): see
+  `docs/ENCRYPTION.md`. Encrypted disks are created on the host with
+  `tools/mkdisk_enc.py` (needs openssl) and unlock at boot with a
+  passphrase (3 attempts, then halt). Unencrypted disks boot
+  unchanged. No passphrase change, no recovery, no authenticated
+  encryption — see the limits in `docs/ENCRYPTION.md`.
 - Package management (`pkg list/install/remove`, `sha256`): see
   `docs/PACKAGES.md`. Packages are verified by SHA-256 on install
   and on load, with dependency resolution, duplicate/upgrade handling,
@@ -39,7 +45,7 @@ What actually works in v0.5.0, verified by booting the real ISO in QEMU:
   implementation is a full phase, and a fake XOR one was not added.
 - Kernel panic path for unhandled exceptions (prints registers, halts)
 
-What is NOT in v0.5.0 — do not mistake this release for it:
+What is NOT in v0.6.0 — do not mistake this release for it:
 
 - No graphical desktop, window manager, or GUI applications yet
 - No graphics, desktop, or networking yet
@@ -67,8 +73,8 @@ Full instructions, tested configuration, and known issues:
 `docs/VM_GUIDE.md`, `docs/BUILD_AND_TEST.md`, `releases/v0.3.0/TEST_REPORT.md`.
 
 **v0.1.0 warning:** v0.1.0 rebooted in a loop in QEMU (wrong GDT selectors
-— see `releases/v0.1.1/TEST_REPORT.md`). Do not use v0.1.0; use v0.5.0.
-QEMU tests: `tests/qemu_test_pkg.py`, `tests/security_test_pkg.py`, plus Phase 5, v0.4.1, and security regressions — all PASS.
+— see `releases/v0.1.1/TEST_REPORT.md`). Do not use v0.1.0; use v0.6.0.
+QEMU tests: `tests/qemu_test_enc.py`, `tests/security_test_enc.py`, plus package, Phase 5, v0.4.1, security, base, and storage regressions — all PASS.
 
 ## Project layout
 

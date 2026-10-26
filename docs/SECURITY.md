@@ -1,11 +1,11 @@
 # Security
 
-Current state (v0.5.0): paging + ring-3 user mode + syscall gate are
+Current state (v0.6.0): paging + ring-3 user mode + syscall gate are
 implemented, filesystem permissions are enforced, and login/sessions
 exist. See below for what is actually enforced and what is not — the
 limits are part of the design, not footnotes.
 
-## Implemented (v0.5.0)
+## Implemented (v0.6.0)
 
 - **Privilege boundary:** user programs run in ring 3, kernel in ring 0.
   Every syscall argument is validated in kernel mode before use:
@@ -50,6 +50,11 @@ limits are part of the design, not footnotes.
   does not reset it. Root unlocks with `unlock <user>` (which also
   clears the count); a successful login clears it too. The per-boot
   3-attempt halt remains as well.
+- **Disk encryption (v0.6.0):** see `docs/ENCRYPTION.md`. AES-256-CTR
+  sector encryption, boot passphrase with key-check, 3-attempt halt,
+  10000-round SHA-256 key derivation with per-disk salt. Unencrypted
+  disks boot unchanged. Raw-disk string check, superblock tamper,
+  header tamper, and package tamper on an encrypted disk all PASS.
 - **Packages (v0.5.0):** see `docs/PACKAGES.md`. Install verifies
   manifest, blob layout, every file SHA-256, dependencies (including
   version operators), and target-file ownership before writing
@@ -66,6 +71,12 @@ limits are part of the design, not footnotes.
 
 ## Honest limits (v0.4.1, not hidden)
 
+- **Disk encryption limits (v0.6.0).** No passphrase change, no
+  recovery key, no authenticated encryption (CTR gives
+  confidentiality, not integrity — corruption is caught by
+  superblock/file/package checks, not by a MAC), and offline brute
+  force is limited only by the 10000-round work factor, so a weak
+  passphrase is guessable. See `docs/ENCRYPTION.md`.
 - **Package signing is NOT implemented.** Hashes prove a file
   matches its manifest and has not changed since install, but they
   do not authenticate the package author. Root must only install
@@ -105,8 +116,9 @@ limits are part of the design, not footnotes.
    design) — builds on the UID/permission model above.
 2. Phase 9: TLS with certificate verification — no "accept all certs"
    mode shipped as a default; diagnostics must not bypass verification.
-3. Phase 11: memory-hard password KDF, package signing, full
-   adversarial review, update verification before install.
+3. Phase 11: memory-hard password KDF (and key derivation),
+   package signing, full adversarial review, update verification
+   before install.
 4. Disk encryption (not in v0.4.1): a real implementation needs
    AES sector encryption plus boot-time key management, which is a
    full phase, not a bugfix. A simple XOR "encryption" was deliberately
