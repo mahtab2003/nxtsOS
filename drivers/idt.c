@@ -2,6 +2,7 @@
 #include "pic.h"
 #include "pit.h"
 #include "keyboard.h"
+#include "mouse.h"
 #include "../kernel/panic.h"
 #include "../kernel/proc.h"
 
@@ -85,6 +86,9 @@ void irq_handler(struct regs *r) {
     } else if (r->int_no == 1) {
         keyboard_irq_handler();
         pic_send_eoi(1);
+    } else if (r->int_no == 12) {
+        mouse_irq_handler();
+        pic_send_eoi(12);
     } else {
         pic_send_eoi((u8)r->int_no);
     }

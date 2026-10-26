@@ -169,23 +169,36 @@ with test + security reports exists in `releases/`.
   no recovery, no authenticated encryption, offline brute force
   limited by the work factor only. See docs/ENCRYPTION.md.
 
-## Phase 7 — Graphics and input (v0.7.0)
+## Phase 7 — Graphics and input (v0.7.0) — DONE
 
-- [ ] **Task 7.1 — Framebuffer, fonts, mouse**
-  Details: VESA/Bochs VBE mode request via Multiboot, framebuffer
-  mapping, bitmap font rendering, PS/2 mouse driver (packets, buttons,
-  movement, bounds clamping).
-- [ ] **Task 7.2 — Window manager and widgets**
-  Details: window creation/move/resize/minimise/maximise/close,
-  focus, z-order, clipping, basic widgets (button, label, text field)
-  that all perform their advertised function; no decorative controls.
-- [ ] **Task 7.3 — Adversarial security test (graphics/input)**
-  Attacker view: a malicious/buggy GUI program. Cases: window larger
-  than the screen, negative coordinates, huge window counts (resource
-  exhaustion), mouse packets out of range, a program drawing outside
-  its window, a program trying to read another window's pixels.
-  Expected: clipped or rejected, compositor survives, no memory
-  corruption. Fix, retest, record.
+- [x] **Task 7.1 — Framebuffer, fonts, mouse**
+  VBE 800x600x32 via Multiboot (see docs/GRAPHICS.md for the four
+  real bugs found and fixed: header offset 32, info offset 88,
+  Multiboot info overwritten by PMM, framebuffer shared with user
+  PDs), 8x16 font from host console font (tools/genfont.py),
+  framebuffer text console (RAM text buffer, redrawn after GUI),
+  PS/2 mouse IRQ12 (packet parsing, clamping, overflow ignore).
+- [x] **Task 7.2 — Window manager and widgets**
+  In-kernel WM demo: move/resize/minimise/maximise/close, focus,
+  z-order, clipping, taskbar, button/label/text-field widgets that
+  all work. Shell `gui` (interactive), `guitest`, `wmautotest`,
+  `mousetest`, `mouse`. User GUI programs are Phase 8, as packages.
+- [x] **Task 7.3 — Adversarial security test (graphics/input)**
+  tests/security_test_gui.py PASS: mousetest, guitest (negative/
+  huge/off-screen/zero-size windows, count limit 8, corner pixels
+  stay background), wmautotest (OK click, drag, Shell exit),
+  GUI screendump 800x600 with teal background, title blue, white
+  cursor at (400,300). One real bug fixed before release: button
+  triggered on release even if dragged off the button. NOT tested
+  in QEMU: real mouse movement via monitor/VNC (QEMU did not inject
+  packets in this sandbox — see docs/GRAPHICS.md); needs a
+  real-device/desktop-QEMU check by the user.
+  Original attacker view for 7.3, all covered by the test above:
+  window larger than the screen, negative coordinates, huge window
+  counts (resource exhaustion), mouse packets out of range, a
+  program drawing outside its window, a program trying to read
+  another window's pixels. Expected: clipped or rejected,
+  compositor survives, no memory corruption. Fix, retest, record.
 
 ## Phase 8 — First desktop release (v0.8.0)
 
@@ -289,5 +302,16 @@ with test + security reports exists in `releases/`.
   all PASS. NOT in v0.6.0: passphrase change, recovery, authenticated
   encryption, package signing. Next: Phase 7 graphics.
 
-Current release: **v0.6.0 = end of disk encryption**. Next: **Phase 7
-graphics**.
+## v0.7.0 — Phase 7 graphics and input (2026-10-27) — DONE
+- VBE 800x600x32 framebuffer, 8x16 font, framebuffer text console,
+  PS/2 mouse, in-kernel window manager (move/resize/minimise/
+  maximise/close/focus/z-order/clipping/taskbar, button/label/
+  text-field widgets). QEMU: security_test_gui PASS (mousetest,
+  guitest, wmautotest, screendump), plus encryption, package,
+  Phase 5, base regressions — all PASS. NOT in v0.7.0: desktop
+  shell/graphical login (Phase 8), user GUI programs, real mouse
+  movement via QEMU/VNC in this sandbox (see docs/GRAPHICS.md).
+  Next: Phase 8 desktop (v0.8.0).
+
+Current release: **v0.7.0 = end of Phase 7**. Next: **Phase 8
+desktop**.

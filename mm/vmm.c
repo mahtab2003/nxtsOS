@@ -55,9 +55,12 @@ void vmm_destroy_pd(u32 pd_phys) {
        be the active one when its frames are returned to the PMM. */
     vmm_enable_paging(kernel_pd);
     u32 *pd = (u32 *)phys_to_virt(pd_phys);
-    /* PD entries 0-7 are the shared kernel region and belong to the
-       kernel PD; only entries 8+ (user space) are freed here. */
+    /* PD entries 0-7 are the shared kernel region, and entry 256 is
+       the shared framebuffer (see vmm_create_pd) — both belong to
+       the kernel PD and must never be freed here. Only the other
+       entries (user space) are freed. */
     for (int i = 8; i < 1024; i++) {
+        if (i == 256) continue;
         if ((pd[i] & PAGE_PRESENT) == 0) continue;
         u32 pt_phys = pd[i] & ~0xFFFu;
         u32 *pt = (u32 *)phys_to_virt(pt_phys);
@@ -77,6 +80,15 @@ u32 vmm_create_pd(void) {
     u32 *npd = (u32 *)phys_to_virt(pd);
     /* Kernel region (PD entries 0-7, covering 0-32 MB) is shared. */
     for (int i = 0; i < 8; i++) npd[i] = kpd[i];
+    /* Framebuffer (PD entry 256, 0x40000000, supervisor pages) is
+       also shared, so kernel code running in syscall context (ring
+       0, with a user PD active) can draw to it — e.g. a user
+       program's print syscall goes through console_putchar, which
+       in graphics mode writes to the framebuffer. Without this,
+       the first user print in graphics mode page-faulted, because
+       FB_VIRT was unmapped in user PDs. User code itself (ring 3)
+       still cannot access these supervisor pages directly. */
+    npd[256] = kpd[256];
     return pd;
 }
 
