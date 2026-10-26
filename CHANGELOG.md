@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.1 — QEMU-verified bugfix (no new features)
+
+- FIX: kernel installs its own GDT (code 0x08, data 0x10) before interrupts.
+  This fixes the v0.1.0 QEMU reboot loop (GRUB's GDT uses 0x10/0x18, so the
+  first timer IRQ triple-faulted on CS=0x08).
+- QEMU boot test: PASS at 128 MB (`help`, `mem`) and 64 MB; `ticks` shows
+  the PIT counting in the VM (214 ticks / 2 seconds).
+- v0.1.0 is superseded — do not distribute it.
+
+# Changelog
+
 ## 0.1.0 — first bootable kernel (Phase 2)
 
 - Multiboot (GRUB) boot, 32-bit x86 original kernel.

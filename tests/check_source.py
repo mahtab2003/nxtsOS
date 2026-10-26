@@ -7,7 +7,7 @@ REQUIRED = [
     "boot/boot.S", "boot/linker.ld",
     "kernel/main.c", "kernel/console.c", "kernel/shell.c", "kernel/panic.c",
     "drivers/serial.c", "drivers/idt.c", "drivers/pic.c", "drivers/pit.c",
-    "drivers/keyboard.c", "drivers/isr.S",
+    "drivers/keyboard.c", "drivers/isr.S", "drivers/gdt.c", "drivers/gdt.S",
     "mm/pmm.c",
     "scripts/build.sh", "scripts/run_qemu.sh", "scripts/test_boot.sh",
     "README.md", "LICENSE", "VERSION",

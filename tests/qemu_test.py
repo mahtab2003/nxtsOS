@@ -9,6 +9,7 @@ ISO, RAM, SERIAL_LOG, MON_SOCK = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv
 MARKERS = [
     "nxtsOS kernel starting",
     "PMM:",
+    "GDT installed",
     "Interrupts enabled",
     "nxts> ",
     "Commands: help, mem, ticks, clear, reboot",
