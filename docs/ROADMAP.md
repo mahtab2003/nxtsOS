@@ -313,5 +313,26 @@ with test + security reports exists in `releases/`.
   movement via QEMU/VNC in this sandbox (see docs/GRAPHICS.md).
   Next: Phase 8 desktop (v0.8.0).
 
-Current release: **v0.7.0 = end of Phase 7**. Next: **Phase 8
+## v0.7.1 — Bugfix: GUI in Bochs, idle timeout setting, terminal after session close (2026-10-27)
+- GUI: GRUB gfxmode 800x600x32 + gfxpayload=keep, Bochs VBE
+  fallback (IO ports + PCI BAR, verified by test pixel, proven in
+  QEMU with Multiboot video request removed), `fbinfo` diagnostic.
+- Session: idle timeout default 30 -> 120 minutes, new `idle`
+  command (`idle` shows, `idle <0-480>` sets, `idle off` disables,
+  per-session, resets on reboot). The full 120-minute timeout is
+  still not waited out in a test — the setting path is tested.
+- Terminal after session close: keyboard buffer is flushed on
+  re-login and on lock (not on first boot login, which must keep
+  buffered keys — flushing there broke base/encryption tests and
+  was fixed), text console is redrawn after an idle lock, and a
+  logout -> new prompt -> `mem` cycle is tested in
+  tests/qemu_test_v071.py. Bochs itself is NOT tested in this
+  sandbox (Bochs is not installed here) — user must confirm
+  `gui` starts in Bochs on v0.7.1.
+- QEMU PASS: v071 test, security_test_gui, encryption, package,
+  base. One real regression caught and fixed during testing: an
+  unconditional keyboard flush on login discarded buffered
+  login/help keys on first boot.
+
+Current release: **v0.7.1 = bugfix on Phase 7**. Next: **Phase 8
 desktop**.

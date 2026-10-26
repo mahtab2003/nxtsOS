@@ -7,6 +7,7 @@
 #include "sha256.h"
 #include "aes.h"
 #include "wm.h"
+#include "fb.h"
 #include "../drivers/mouse.h"
 #include "../mm/pmm.h"
 #include "../drivers/pit.h"
@@ -16,6 +17,12 @@
 static char session_name[32];
 static u32 session_uid = 0;
 static int session_active = 0;
+/* Idle session lock timeout, v0.7.1: configurable via `idle`, default
+   120 minutes (was a hardcoded 30 minutes, which users reported as
+   "session ends too quickly" with no way to change it). 0 = never
+   lock on idle. This is a per-session setting: it resets to 120 on
+   reboot, and only the current session's shell can change it. */
+static u32 idle_timeout_minutes = 120;
 
 static void audit(const char *event, const char *user) {
     if (!fs_mounted()) return;
@@ -141,6 +148,17 @@ static int read_line(char *buf, u32 max, int echo) {
    returns on 3 consecutive failures (system halted). If no users file
    exists, falls back to root with a warning and returns 1. */
 static int do_login(void) {
+    /* Flush stale keys before a RE-LOGIN prompt, so a key pressed
+       during the previous session (or during logout) cannot be
+       consumed as a username and silently fail a login attempt.
+       Do NOT flush on the first login after boot: the boot message
+       promises "keys typed now are buffered", and test harnesses
+       (and users) type the login before the prompt appears — those
+       buffered keys must survive. Flushing on every login broke
+       that promise and failed the base/encryption tests. */
+    static int seen_login = 0;
+    if (seen_login) keyboard_flush();
+    seen_login = 1;
     int n = users_load();
     if (n == 0) {
         console_write("No users file found: running as root (setup mode).\n");
@@ -225,6 +243,9 @@ static int do_lock(void) {
         console_write("No users configured: session lock unavailable in setup mode.\n");
         return 1;
     }
+    /* Stale keys from the previous session must not become the
+       unlock password (see keyboard_flush). */
+    keyboard_flush();
     console_write("Session locked. Enter password: ");
     char pass[64];
     read_line(pass, sizeof(pass), 0);
@@ -244,7 +265,31 @@ static int execute(char *line) {
     int n = tokenize(line, tok, &rest);
     if (n == 0) return 0;
     if (strcmp(tok[0], "help") == 0) {
-        console_write("Commands: help, mem, ticks, clear, reboot, fs, ls, cat <file>, write <file> <text>, rm <file>, run <file>, runbg <file>, jobs, kill <pid>, lock, unlock <user>, whoami, logout, pkg list, pkg install <file>, pkg remove <name>, pkg remove <name> force, sha256 <file>, aes-test, gui, guitest, mouse\n");
+        console_write("Commands: help, mem, ticks, clear, reboot, fs, ls, cat <file>, write <file> <text>, rm <file>, run <file>, runbg <file>, jobs, kill <pid>, lock, unlock <user>, whoami, logout, idle [minutes|off], fbinfo, pkg list, pkg install <file>, pkg remove <name>, pkg remove <name> force, sha256 <file>, aes-test, gui, guitest, mouse\n");
+    } else if (strcmp(tok[0], "idle") == 0) {
+        if (n < 2) {
+            if (idle_timeout_minutes == 0) console_write("Idle timeout: disabled (never locks on idle)\n");
+            else console_printf("Idle timeout: %u minutes\n", idle_timeout_minutes);
+        } else if (strcmp(tok[1], "off") == 0) {
+            idle_timeout_minutes = 0;
+            console_write("Idle lock disabled for this session.\n");
+        } else {
+            u32 v = 0; int bad = 0;
+            for (const char *p = tok[1]; *p; p++) {
+                if (*p < '0' || *p > '9' || v > 100000) { bad = 1; break; }
+                v = v * 10u + (u32)(*p - '0');
+            }
+            if (bad || v > 480) { console_write("Usage: idle [minutes 0-480|off] (0 = never)\n"); return 0; }
+            idle_timeout_minutes = v;
+            if (v == 0) console_write("Idle lock disabled for this session.\n");
+            else console_printf("Idle timeout set to %u minutes for this session.\n", v);
+        }
+    } else if (strcmp(tok[0], "fbinfo") == 0) {
+        if (fb_ready()) console_printf("Framebuffer: %ux%u, pitch %u, phys 0x%x (ready)\n",
+                                       fb_width(), fb_height(), fb_pitch(), fb_phys_addr());
+        else console_printf("Framebuffer: not available - %s (GRUB bpp=%d type=%d)\n",
+                            fb_diag_reason(), fb_diag_bpp(), fb_diag_type());
+        console_write("If this says no framebuffer in Bochs, check the emulator's VGA settings (Bochs needs vga extension=vbe) or try QEMU with -vga std.\n");
     } else if (strcmp(tok[0], "mem") == 0) {
         cmd_mem();
     } else if (strcmp(tok[0], "ticks") == 0) {
@@ -466,17 +511,23 @@ static int shell_loop(void) {
                    job returns on its 100 ms timer preemption, so the
                    shell never blocks on a background program. */
                 proc_bg_tick();
-                /* Idle session lock: v0.4.1 raised from 10 to 30
-                   minutes (180000 ticks at 100 Hz) — 10 minutes was
-                   locking users out while they were still working
-                   with the VM. The lock/unlock code path itself is
-                   QEMU-tested via the `lock` command; waiting out
-                   30 minutes in a test is still not feasible, and
-                   that is documented as such. */
-                if (session_active && timer_ticks - last_activity > 180000) {
+                /* Idle session lock: v0.7.1 default 120 minutes,
+                   configurable via `idle` (0 = never). The lock/
+                   unlock code path itself is QEMU-tested via the
+                   `lock` command; waiting out the full timeout in
+                   a test is still not feasible, and that is
+                   documented as such. */
+                if (session_active && idle_timeout_minutes != 0 &&
+                    timer_ticks - last_activity > idle_timeout_minutes * 6000u) {
                     console_write("\nSession locked due to inactivity.\n");
                     if (do_lock()) {
                         last_activity = timer_ticks;
+                        /* Redraw the text console after the lock
+                           prompt, so the terminal is in a known-good
+                           state before the next prompt (a lock that
+                           left the display half-drawn was reported
+                           as "terminal doesn't work"). */
+                        console_redraw_text();
                         break;
                     }
                     audit("logout", session_name);

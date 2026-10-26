@@ -5,6 +5,13 @@
 static int ready = 0;
 static u32 width = 0, height = 0, pitch = 0, phys = 0;
 static u32 *fb = 0; /* virtual address FB_VIRT, 32bpp pixels */
+/* Diagnostics for `fbinfo`: what GRUB actually passed, so a "no
+   framebuffer" report can be diagnosed instead of guessed at. */
+static const char *diag_reason = "not parsed";
+static int diag_bpp = -1, diag_type = -1;
+const char *fb_diag_reason(void) { return diag_reason; }
+int fb_diag_bpp(void) { return diag_bpp; }
+int fb_diag_type(void) { return diag_type; }
 
 int fb_ready(void) { return ready; }
 u32 fb_width(void) { return width; }
@@ -21,7 +28,7 @@ u32 fb_phys_addr(void) { return phys; }
 static int parsed = 0;
 int fb_parse(u32 mbi_addr) {
     u32 *mbi = (u32 *)mbi_addr;
-    if ((mbi[0] & (1u << 12)) == 0) return -1; /* no framebuffer info */
+    if ((mbi[0] & (1u << 12)) == 0) { diag_reason = "GRUB passed no framebuffer info (flag 12 clear)"; return -1; }
     /* Multiboot info: framebuffer_addr is u64 at byte offset 88
        (VBE fields are 2 bytes each, so the framebuffer section
        starts 4 bytes earlier than a naive 4-byte-per-field count
@@ -35,12 +42,70 @@ int fb_parse(u32 mbi_addr) {
     u32 w = (u32)b[100] | ((u32)b[101] << 8) | ((u32)b[102] << 16) | ((u32)b[103] << 24);
     u32 h = (u32)b[104] | ((u32)b[105] << 8) | ((u32)b[106] << 16) | ((u32)b[107] << 24);
     u8 bpp = b[108], type = b[109];
-    if (fb_hi != 0 || fb_lo == 0 || (fb_lo & 0xFFF) != 0) return -1;
-    if (bpp != 32 || type != 1) return -1; /* only 32bpp RGB is supported */
-    if (w == 0 || h == 0 || w > 4096 || h > 4096 || p < w * 4) return -1;
+    diag_bpp = (int)bpp; diag_type = (int)type;
+    if (fb_hi != 0 || fb_lo == 0 || (fb_lo & 0xFFF) != 0) { diag_reason = "framebuffer address invalid (high word set, zero, or unaligned)"; return -1; }
+    if (bpp != 32 || type != 1) { diag_reason = "unsupported mode (only 32bpp RGB, type 1, is supported)"; return -1; }
+    if (w == 0 || h == 0 || w > 4096 || h > 4096 || p < w * 4) { diag_reason = "invalid dimensions or pitch"; return -1; }
     phys = fb_lo; pitch = p; width = w; height = h;
-    parsed = 1;
+    parsed = 1; diag_reason = "ok";
     return 0;
+}
+
+/* Bochs VBE fallback (v0.7.1): if GRUB did not set a graphics mode
+   — the reported failure in Bochs, where the kernel booted in text
+   mode and `gui`/`guitest` said "no framebuffer available" — try to
+   set one directly. Bochs VBE (also QEMU's std VGA, which is
+   Bochs-compatible) is driven via IO ports 0x1CE (index) and 0x1CF
+   (data): ID 0, XRES 1, YRES 2, BPP 3, ENABLE 4 (bit 0 = enabled,
+   bit 6 = linear framebuffer), VIRT_WIDTH 6, VIRT_HEIGHT 7. The
+   linear framebuffer address is NOT a VBE register: it is the PCI
+   BAR0 of the display device, read via PCI config ports 0xCF8/
+   0xCFC. We scan bus 0 for a class-0x03 (display) device instead
+   of hardcoding a slot, and we never guess an address: if no PCI
+   display BAR is found, the fallback fails cleanly and the system
+   stays in text mode. */
+static void vbe_write(u16 index, u16 val) { outw(0x1CE, index); outw(0x1CF, val); }
+static u16 vbe_read(u16 index) { outw(0x1CE, index); return inw(0x1CF); }
+static u32 pci_read32(u32 dev, u32 func, u32 off) {
+    outl(0xCF8, 0x80000000u | (dev << 11) | (func << 8) | (off & 0xFC));
+    return inl(0xCFC);
+}
+int fb_vbe_try(void) {
+    vbe_write(0, 0xB0C2);
+    u16 id = vbe_read(0);
+    if (id < 0xB0C0 || id > 0xB0CF) { diag_reason = "VBE fallback: no Bochs VBE device (ID check failed)"; return -1; }
+    u32 bar = 0;
+    for (u32 dev = 0; dev < 32; dev++) {
+        u32 vendor = pci_read32(dev, 0, 0) & 0xFFFF;
+        if (vendor == 0xFFFF) continue;
+        u32 class_code = pci_read32(dev, 0, 0x08) >> 24;
+        if (class_code != 0x03) continue;
+        u32 b0 = pci_read32(dev, 0, 0x10);
+        if (b0 & 1) continue; /* IO BAR, not a framebuffer */
+        bar = b0 & 0xFFFFFFF0u;
+        if (bar != 0) break;
+    }
+    if (bar == 0) { diag_reason = "VBE fallback: no PCI display BAR found"; return -1; }
+    vbe_write(1, 800); vbe_write(2, 600); vbe_write(3, 32);
+    vbe_write(6, 800); vbe_write(7, 600);
+    vbe_write(4, 0x41); /* enabled + linear framebuffer, clear memory */
+    if (vbe_read(1) != 800 || vbe_read(2) != 600 || vbe_read(3) != 32) {
+        vbe_write(4, 0); diag_reason = "VBE fallback: mode 800x600x32 was not accepted"; return -1;
+    }
+    phys = bar; pitch = 800 * 4; width = 800; height = 600;
+    parsed = 1; diag_reason = "ok (VBE fallback)";
+    return 0;
+}
+
+void fb_disable(void) { ready = 0; fb = 0; }
+void fb_vbe_disable(void) { vbe_write(4, 0); }
+int fb_verify(void) {
+    if (!ready) return -1;
+    u32 saved = fb[0];
+    fb[0] = 0x00AABBCCu;
+    u32 back = fb[0];
+    fb[0] = saved;
+    return back == 0x00AABBCCu ? 0 : -1;
 }
 
 int fb_init(void) {
