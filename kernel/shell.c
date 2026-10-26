@@ -3,6 +3,8 @@
 #include "shell.h"
 #include "users.h"
 #include "proc.h"
+#include "pkg.h"
+#include "sha256.h"
 #include "../mm/pmm.h"
 #include "../drivers/pit.h"
 #include "../drivers/keyboard.h"
@@ -239,7 +241,7 @@ static int execute(char *line) {
     int n = tokenize(line, tok, &rest);
     if (n == 0) return 0;
     if (strcmp(tok[0], "help") == 0) {
-        console_write("Commands: help, mem, ticks, clear, reboot, fs, ls, cat <file>, write <file> <text>, rm <file>, run <file>, runbg <file>, jobs, kill <pid>, lock, unlock <user>, whoami, logout\n");
+        console_write("Commands: help, mem, ticks, clear, reboot, fs, ls, cat <file>, write <file> <text>, rm <file>, run <file>, runbg <file>, jobs, kill <pid>, lock, unlock <user>, whoami, logout, pkg list, pkg install <file>, pkg remove <name>, pkg remove <name> force, sha256 <file>\n");
     } else if (strcmp(tok[0], "mem") == 0) {
         cmd_mem();
     } else if (strcmp(tok[0], "ticks") == 0) {
@@ -312,6 +314,45 @@ static int execute(char *line) {
             console_printf("run: cannot run %s\n", tok[1]);
             return 0;
         }
+    } else if (strcmp(tok[0], "pkg") == 0) {
+        /* Note: tokenize() stops at 2 tokens and puts the rest in
+           `rest`, so pkg subcommand arguments come from `rest`, not
+           tok[2]/tok[3]. */
+        if (n < 2) { console_write("Usage: pkg list | pkg install <file> | pkg remove <name> [force]\n"); return 0; }
+        if (strcmp(tok[1], "list") == 0) {
+            pkg_list();
+        } else if (strcmp(tok[1], "install") == 0) {
+            if (!rest || rest[0] == 0) { console_write("Usage: pkg install <file>\n"); return 0; }
+            if (session_uid != 0) { console_write("pkg install: root only\n"); return 0; }
+            pkg_install(rest);
+        } else if (strcmp(tok[1], "remove") == 0) {
+            if (!rest || rest[0] == 0) { console_write("Usage: pkg remove <name> [force]\n"); return 0; }
+            if (session_uid != 0) { console_write("pkg remove: root only\n"); return 0; }
+            /* rest is "name" or "name force". */
+            char *sp = rest;
+            while (*sp && *sp != ' ') sp++;
+            int force = 0;
+            if (*sp == ' ') {
+                *sp = 0; sp++;
+                while (*sp == ' ') sp++;
+                force = strcmp(sp, "force") == 0;
+            }
+            pkg_remove(rest, force);
+        } else {
+            console_write("Usage: pkg list | pkg install <file> | pkg remove <name> [force]\n");
+        }
+    } else if (strcmp(tok[0], "sha256") == 0) {
+        if (n < 2) { console_write("Usage: sha256 <file>\n"); return 0; }
+        /* Files up to 64 KiB, as with ELF loading. */
+        static u8 hash_buf[65536];
+        u32 size = 0;
+        if (fs_read_as(tok[1], hash_buf, sizeof(hash_buf), &size, session_uid) != 0) {
+            console_printf("sha256: cannot read %s\n", tok[1]); return 0;
+        }
+        u8 digest[32]; char hex[65];
+        sha256_compute(hash_buf, size, digest);
+        sha256_hex(digest, hex);
+        console_printf("%s  %s\n", hex, tok[1]);
     } else if (strcmp(tok[0], "runbg") == 0) {
         if (n < 2) { console_write("Usage: runbg <file>\n"); return 0; }
         if (proc_bg_start(tok[1], session_uid) != 0) {

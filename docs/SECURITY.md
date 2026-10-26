@@ -1,11 +1,11 @@
 # Security
 
-Current state (v0.4.1): paging + ring-3 user mode + syscall gate are
+Current state (v0.5.0): paging + ring-3 user mode + syscall gate are
 implemented, filesystem permissions are enforced, and login/sessions
 exist. See below for what is actually enforced and what is not — the
 limits are part of the design, not footnotes.
 
-## Implemented (v0.4.1)
+## Implemented (v0.5.0)
 
 - **Privilege boundary:** user programs run in ring 3, kernel in ring 0.
   Every syscall argument is validated in kernel mode before use:
@@ -50,6 +50,13 @@ limits are part of the design, not footnotes.
   does not reset it. Root unlocks with `unlock <user>` (which also
   clears the count); a successful login clears it too. The per-boot
   3-attempt halt remains as well.
+- **Packages (v0.5.0):** see `docs/PACKAGES.md`. Install verifies
+  manifest, blob layout, every file SHA-256, dependencies (including
+  version operators), and target-file ownership before writing
+  anything; removal is refused if another package depends on it
+  (unless forced, with a warning); load-time SHA-256 verification
+  refuses a tampered installed file. Install/remove are root-only.
+  Registry `packages.txt` is root-only (mode 0600, system file).
 - **Session lock (v0.4.1):** idle timeout raised from 10 to 30
   minutes, the activity stamp is refreshed after a command finishes
   (so a long `run` does not cause an immediate lock on return), and
@@ -59,6 +66,15 @@ limits are part of the design, not footnotes.
 
 ## Honest limits (v0.4.1, not hidden)
 
+- **Package signing is NOT implemented.** Hashes prove a file
+  matches its manifest and has not changed since install, but they
+  do not authenticate the package author. Root must only install
+  packages from trusted sources. Signing (key storage, distribution,
+  revocation) is a Phase 11 hardening item, not claimed in v0.5.0.
+- **Upgrade atomicity limit.** Normal installs roll back on a failed
+  write; an upgrade that fails mid-write (disk error only, after
+  pre-checks) could leave mixed files while the registry still names
+  the old version. See `docs/PACKAGES.md`.
 - **Password hash is stronger but still not a production KDF.** The
   10000-iteration hash has a work factor but no memory hardness, so a
   well-resourced attacker with the disk can still brute-force weak
@@ -89,8 +105,8 @@ limits are part of the design, not footnotes.
    design) — builds on the UID/permission model above.
 2. Phase 9: TLS with certificate verification — no "accept all certs"
    mode shipped as a default; diagnostics must not bypass verification.
-3. Phase 11: memory-hard password KDF, full adversarial review,
-   update verification before install.
+3. Phase 11: memory-hard password KDF, package signing, full
+   adversarial review, update verification before install.
 4. Disk encryption (not in v0.4.1): a real implementation needs
    AES sector encryption plus boot-time key management, which is a
    full phase, not a bugfix. A simple XOR "encryption" was deliberately

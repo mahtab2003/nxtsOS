@@ -19,6 +19,7 @@ int  fs_write(const char *name, const u8 *data, u32 len, u32 uid, u32 mode);
 int  fs_write_as(const char *name, const u8 *data, u32 len, u32 uid, u32 mode);
 int  fs_delete(const char *name);
 int  fs_delete_as(const char *name, u32 uid);
+int  fs_exists(const char *name); /* 1 if a valid entry exists, else 0 */
 int  fs_append(const char *name, const u8 *data, u32 len); /* root-only, audit log */
 u32  fs_free_sectors(void);
 #endif

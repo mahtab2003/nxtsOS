@@ -1,4 +1,5 @@
 #include "elf.h"
+#include "pkg.h"
 #include "console.h"
 #include "../fs/vfs.h"
 #include "../mm/pmm.h"
@@ -28,6 +29,11 @@ int elf_create_proc(const char *name, u32 uid, struct proc *p) {
     memset(p, 0, sizeof(*p));
     u32 size = 0;
     if (fs_read_as(name, elf_buf, sizeof(elf_buf), &size, uid) != 0) return -1;
+    /* Load-time verification (Phase 6): if this file belongs to an
+       installed package, its SHA-256 must match the registry, or the
+       file is tampered and must not run — even if it is still a
+       valid ELF. Loose (non-package) files run as before. */
+    if (pkg_verify_file(name, elf_buf, size) != 0) return -1;
     if (size < sizeof(struct elfhdr)) return -1;
     struct elfhdr *eh = (struct elfhdr *)elf_buf;
     if (eh->ident[0] != 0x7F || eh->ident[1] != 'E' || eh->ident[2] != 'L' || eh->ident[3] != 'F') return -1;
