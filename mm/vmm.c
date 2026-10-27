@@ -49,6 +49,26 @@ void vmm_init(void) {
 
 u32 vmm_kernel_pd(void) { return kernel_pd; }
 
+void vmm_destroy_pd(u32 pd_phys) {
+    if (pd_phys == 0 || pd_phys == kernel_pd) return;
+    /* Switch back to the kernel PD first: the PD being freed must not
+       be the active one when its frames are returned to the PMM. */
+    vmm_enable_paging(kernel_pd);
+    u32 *pd = (u32 *)phys_to_virt(pd_phys);
+    /* PD entries 0-7 are the shared kernel region and belong to the
+       kernel PD; only entries 8+ (user space) are freed here. */
+    for (int i = 8; i < 1024; i++) {
+        if ((pd[i] & PAGE_PRESENT) == 0) continue;
+        u32 pt_phys = pd[i] & ~0xFFFu;
+        u32 *pt = (u32 *)phys_to_virt(pt_phys);
+        for (int j = 0; j < 1024; j++) {
+            if (pt[j] & PAGE_PRESENT) pmm_free_frame(pt[j] & ~0xFFFu);
+        }
+        pmm_free_frame(pt_phys);
+    }
+    pmm_free_frame(pd_phys);
+}
+
 u32 vmm_create_pd(void) {
     u32 pd = pmm_alloc_frame();
     if (pd == 0) panic("vmm: out of frames for process page directory");

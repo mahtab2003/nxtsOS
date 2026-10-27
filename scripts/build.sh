@@ -25,7 +25,7 @@ gcc $CFLAGS -c kernel/user_blob.S -o build/user_blob.o
 for f in kernel/util.c kernel/console.c kernel/panic.c kernel/shell.c kernel/main.c \
          kernel/proc.c kernel/syscall.c \
          drivers/serial.c drivers/idt.c drivers/pic.c drivers/pit.c drivers/keyboard.c \
-         drivers/gdt.c mm/pmm.c mm/vmm.c; do
+         drivers/gdt.c drivers/ata.c fs/nxtsfs.c mm/pmm.c mm/vmm.c; do
     o="build/$(basename "$f" .c).o"
     echo "cc $f -> $o"
     gcc $CFLAGS -c "$f" -o "$o"
@@ -37,7 +37,7 @@ gcc -m32 -no-pie -Wl,--build-id=none -T boot/linker.ld -nostdlib -o build/nxtsOS
     build/boot.o build/isr.o build/gdt_asm.o build/switch.o build/syscall_asm.o \
     build/user_blob.o build/util.o build/console.o build/panic.o \
     build/shell.o build/main.o build/proc.o build/syscall.o build/serial.o build/idt.o \
-    build/pic.o build/pit.o build/keyboard.o build/gdt.o build/pmm.o build/vmm.o
+    build/pic.o build/pit.o build/keyboard.o build/gdt.o build/ata.o build/nxtsfs.o build/pmm.o build/vmm.o
 ls -l build/nxtsOS.bin
 if command -v grub-file >/dev/null 2>&1; then
     grub-file --is-x86-multiboot build/nxtsOS.bin && echo "grub-file: multiboot OK"

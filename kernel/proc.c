@@ -3,6 +3,7 @@
 #include "../mm/vmm.h"
 #include "../drivers/gdt.h"
 #include "../drivers/pit.h"
+#include "../mm/pmm.h"
 
 extern const u8 user_prog_blob[];
 extern const u8 user_prog_blob_end[];
@@ -72,7 +73,16 @@ void scheduler_run(void) {
             }
         }
     } while (remaining > 0);
-    console_write("All user processes finished.\n");
+    /* Teardown (fixes the v0.2.0 leak): free each exited process's
+       user frames, page tables, and page directory. */
+    for (int i = 0; i < proc_count; i++) {
+        if (procs[i].state == PROC_EXITED) {
+            vmm_destroy_pd(procs[i].pd);
+            procs[i].pd = 0;
+        }
+    }
+    console_printf("All user processes finished. PMM used=%u frames\n",
+                   pmm_used_frames());
 }
 
 void timer_maybe_preempt(struct regs *r) {
