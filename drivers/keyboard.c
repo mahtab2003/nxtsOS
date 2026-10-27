@@ -49,3 +49,10 @@ int keyboard_getchar(void) {
     tail = (tail + 1) % BUF_SIZE;
     return (int)c;
 }
+
+/* Discard any buffered keys. Used on login, lock, and logout, so a
+   key typed during a previous session (or during a lock prompt) is
+   never consumed as the next session's username, password, or first
+   command — stale keys were a real cause of "terminal doesn't work
+   after session close" reports. */
+void keyboard_flush(void) { tail = head; }

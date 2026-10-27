@@ -4,9 +4,9 @@ An original, ultra-lightweight desktop operating system, built from scratch.
 Not a Linux distribution, not a fork, not a re-themed desktop: nxtsOS boots
 its own kernel.
 
-## Status — v0.7.0 (Graphics + window manager, NOT a desktop shell yet)
+## Status — v0.7.1 (Graphics + window manager, NOT a desktop shell yet)
 
-What actually works in v0.7.0, verified by booting the real ISO in QEMU:
+What actually works in v0.7.1, verified by booting the real ISO in QEMU:
 
 - Multiboot boot path (GRUB), 32-bit x86 kernel written from scratch.
   The GRUB menu version is now generated from the `VERSION` file at
@@ -31,10 +31,19 @@ What actually works in v0.7.0, verified by booting the real ISO in QEMU:
   framebuffer, 8x16 font, framebuffer text console, PS/2 mouse,
   in-kernel window manager (`gui` command: move/resize/minimise/
   maximise/close/focus/taskbar, button/label/text-field widgets).
-  Real mouse movement via QEMU/VNC was NOT testable in the build
-  sandbox (QEMU did not inject mouse packets) — test `gui` with a
-  real mouse on your machine; driver + WM click/drag logic are
-  proven via `mousetest`/`wmautotest`.
+  v0.7.1 adds a Bochs VBE fallback so `gui` starts even when GRUB
+  sets no graphics mode (proven in QEMU with the Multiboot video
+  request removed), plus `fbinfo` to diagnose a missing
+  framebuffer. Real mouse movement via QEMU/VNC was NOT testable
+  in the build sandbox (QEMU did not inject mouse packets) — test
+  `gui` with a real mouse on your machine; driver + WM click/drag
+  logic are proven via `mousetest`/`wmautotest`. Bochs itself is
+  NOT tested here (not installed) — confirm `gui` starts in Bochs.
+- Session: idle timeout is now configurable with `idle`
+  (`idle 240` for 4 hours, `idle off` to never lock, default 120
+  minutes, per-session). Terminal after logout/lock is fixed:
+  stale keys are flushed on re-login and the console is redrawn
+  after a lock.
 - Disk encryption (AES-256-CTR, boot passphrase): see
   `docs/ENCRYPTION.md`. Encrypted disks are created on the host with
   `tools/mkdisk_enc.py` (needs openssl) and unlock at boot with a
@@ -81,7 +90,7 @@ Full instructions, tested configuration, and known issues:
 `docs/VM_GUIDE.md`, `docs/BUILD_AND_TEST.md`, `releases/v0.3.0/TEST_REPORT.md`.
 
 **v0.1.0 warning:** v0.1.0 rebooted in a loop in QEMU (wrong GDT selectors
-— see `releases/v0.1.1/TEST_REPORT.md`). Do not use v0.1.0; use v0.7.0.
+— see `releases/v0.1.1/TEST_REPORT.md`). Do not use v0.1.0; use v0.7.1.
 QEMU tests: `tests/security_test_gui.py`, `tests/qemu_test_enc.py`, `tests/security_test_enc.py`, plus package, Phase 5, base, and storage regressions — all PASS.
 
 ## Project layout

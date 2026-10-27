@@ -91,6 +91,44 @@ cases), `wmautotest` (scripted click/drag/taskbar test),
 (print current mouse state), `mousepoll` (diagnostic: poll the
 controller for bytes, used while diagnosing QEMU mouse injection).
 
+## v0.7.1 fix: GUI in Bochs (and other emulators where GRUB sets no mode)
+
+A user running v0.7.0 in Bochs reported `guitest: no framebuffer
+available` — the kernel booted in text mode, so `gui` could not
+start at all. Three changes, all verified in QEMU:
+
+1. **GRUB gfxmode.** `config/vm/grub.cfg` now sets
+   `gfxmode=800x600x32` and `gfxpayload=keep`, so GRUB itself tries
+   to set the mode before the kernel loads, in addition to the
+   Multiboot header request. If the mode is unavailable, GRUB falls
+   back to text mode as before — this cannot break a working QEMU
+   boot (verified: normal QEMU boot still reports Multiboot).
+2. **Bochs VBE fallback in the kernel.** If GRUB still passed no
+   framebuffer, the kernel now tries to set 800x600x32 itself via
+   the Bochs VBE IO ports (0x1CE/0x1CF: ID, XRES, YRES, BPP, ENABLE
+   0x41 = enabled + linear framebuffer) and finds the linear
+   framebuffer address from the PCI BAR0 of the first class-0x03
+   (display) device on bus 0 — it never guesses an address. The
+   mapped framebuffer is verified by a write/read test pixel; if
+   verification fails, VBE is turned off again and the system
+   stays in text mode. Proof in QEMU: a test kernel with the
+   Multiboot VIDEO flag removed and a GRUB menu with no gfxmode
+   booted with "Framebuffer: 800x600, pitch 3200, phys 0xFD000000
+   (VBE fallback)" and guitest/mousetest/wmautotest all PASS.
+   QEMU's std VGA is Bochs-compatible, so this is strong evidence
+   the fallback works in Bochs too, but Bochs itself is NOT
+   installed in this sandbox — the user must confirm `gui` starts
+   in Bochs on v0.7.1.
+3. **Diagnosis.** New shell command `fbinfo` prints the
+   framebuffer status and, when absent, the reason GRUB failed
+   (no info flag, unsupported bpp/type, bad address/dimensions,
+   or the VBE fallback reason). `gui`/`guitest` still report "no
+   framebuffer available" when there is none, but `fbinfo` now
+   says why. If Bochs still shows no framebuffer on v0.7.1, run
+   `fbinfo` and report its output — and check Bochs is configured
+   with `vga: extension=vbe` (without a VBE-capable VGA, no kernel
+   code can set a graphics mode).
+
 ## What is NOT tested, stated plainly
 
 **Real mouse movement via QEMU/VNC did not work in this sandbox.**

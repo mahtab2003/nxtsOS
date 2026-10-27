@@ -11,6 +11,13 @@
    framebuffer out of bounds. */
 int  fb_parse(u32 mbi_addr); /* early, before PMM: save framebuffer info from Multiboot */
 int  fb_init(void); /* after vmm_init: map the saved framebuffer */
+int  fb_vbe_try(void); /* Bochs VBE fallback: set 800x600x32 via IO ports + PCI BAR, if Multiboot gave no mode */
+void fb_vbe_disable(void); /* turn VBE mode off again (text-mode fallback after a failed VBE attempt) */
+int  fb_verify(void); /* write/read a test pixel: 0 = framebuffer is really writable */
+void fb_disable(void); /* drop back to text mode (after a failed verify) */
+const char *fb_diag_reason(void); /* why fb_parse failed, or "ok" */
+int  fb_diag_bpp(void); /* bpp GRUB reported, or -1 if no framebuffer info */
+int  fb_diag_type(void); /* type GRUB reported, or -1 */
 int  fb_ready(void);
 u32  fb_width(void);
 u32  fb_height(void);

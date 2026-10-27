@@ -29,7 +29,7 @@ void kmain(u32 magic, u32 mbi_addr) {
     serial_init();
     console_init();
     console_write("nxtsOS kernel starting\n");
-    console_write("nxtsOS v0.7.0 - original kernel, Multiboot boot\n");
+    console_write("nxtsOS v0.7.1 - original kernel, Multiboot boot\n");
     if (magic != 0x2BADB002) panic("bad Multiboot magic");
     /* Save framebuffer info NOW, before PMM can overwrite GRUB's
        Multiboot info page (see fb_parse). */
@@ -46,14 +46,24 @@ void kmain(u32 magic, u32 mbi_addr) {
     vmm_init();
     console_write("Paging enabled (kernel identity-mapped 0-32 MB)\n");
     /* Framebuffer: after paging, so its physical pages can be mapped.
-       If GRUB did not set a graphics mode, this fails cleanly and
-       the system continues in VGA text mode. */
-    if (fb_present == 0 && fb_init() == 0) {
-        console_printf("Framebuffer: %ux%u, pitch %u, phys 0x%x\n",
-                       fb_width(), fb_height(), fb_pitch(), fb_phys_addr());
+       v0.7.1: if GRUB did not set a graphics mode (the Bochs
+       failure: kernel booted in text mode, `gui` said "no
+       framebuffer"), try the Bochs VBE fallback before giving up.
+       If the mapped framebuffer does not read back a test pixel,
+       drop to text mode rather than drawing into a broken
+       framebuffer. */
+    int fb_source = 0; /* 1 = Multiboot, 2 = VBE fallback */
+    if (fb_present == 0) fb_source = 1;
+    else if (fb_vbe_try() == 0) fb_source = 2;
+    if (fb_source != 0 && fb_init() == 0 && fb_verify() == 0) {
+        console_printf("Framebuffer: %ux%u, pitch %u, phys 0x%x (%s)\n",
+                       fb_width(), fb_height(), fb_pitch(), fb_phys_addr(),
+                       fb_source == 1 ? "Multiboot" : "VBE fallback");
         console_switch_to_fb();
     } else {
-        console_write("Framebuffer: not available (text mode)\n");
+        if (fb_source != 0) fb_disable();
+        if (fb_source == 2) fb_vbe_disable();
+        console_printf("Framebuffer: not available (text mode) - %s\n", fb_diag_reason());
     }
     idt_init();
     pic_init();
