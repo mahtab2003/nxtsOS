@@ -100,3 +100,20 @@ delivers keys to the focused window.
   input is tested and working.
 - Once you can type, run `gui` to start the window manager,
   or `kbdstat` to see controller status and last scancode.
+
+## GUI lag (v0.7.4)
+
+- If the GUI feels laggy, the main cause in v0.7.0-0.7.3 was
+  kernel redraw volume (full screen on every mouse move,
+  cursor only updated every 0.5s with the button up) — fixed
+  in v0.7.4 by cursor save/restore, dirty-rect redraw, and
+  30 Hz throttling. Test v0.7.4 before changing emulator
+  settings.
+- Bochs display refresh also caps smoothness: the shipped
+  desktop bochsrc now uses update_freq=30 (was 5). On Android
+  Bochs, if your app exposes a display update frequency,
+  set it to 20-30; if it does not, the kernel fixes still
+  apply, but the display will refresh at the app's rate.
+- Bochs on a phone will always be slower than QEMU on a PC
+  (interpreter vs dynamic translation). For the smoothest
+  GUI, test on QEMU on a PC.

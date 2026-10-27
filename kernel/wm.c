@@ -198,6 +198,37 @@ static const u16 cursor_bits[16] = {
     0x800, 0xC00, 0xE00, 0xF00, 0xF80, 0xFC0, 0xFE0, 0xFF0,
     0xFF8, 0xF80, 0xD80, 0xCC0, 0xC60, 0xC30, 0xC00, 0xC00
 };
+/* v0.7.4 cursor sprite save/restore. The cursor bounding box is
+   13x17 (12x16 arrow plus 1px black shadow offset). Before drawing
+   the cursor, the pixels underneath are saved; moving the cursor
+   then costs ~442 pixel writes (restore old + save new + draw
+   new) instead of a full-screen redraw (480,000 pixels). This
+   also fixes a real lag bug in v0.7.0-0.7.3: the loop had NO
+   branch for mouse movement with the button up, so the cursor
+   only moved on the 0.5s periodic redraw — moving the mouse to
+   click something felt like 2 frames per second, whatever the
+   redraw speed was. */
+#define CUR_W 13
+#define CUR_H 17
+static u32 cursor_saved[CUR_W * CUR_H];
+static s32 cursor_saved_x = 0, cursor_saved_y = 0;
+static int cursor_saved_valid = 0;
+static void cursor_save_at(s32 mx, s32 my) {
+    for (int dy = 0; dy < CUR_H; dy++)
+        for (int dx = 0; dx < CUR_W; dx++)
+            cursor_saved[dy * CUR_W + dx] = fb_read_pixel(mx + dx, my + dy);
+    cursor_saved_x = mx; cursor_saved_y = my; cursor_saved_valid = 1;
+}
+static void cursor_restore(void) {
+    if (!cursor_saved_valid) return;
+    for (int dy = 0; dy < CUR_H; dy++)
+        for (int dx = 0; dx < CUR_W; dx++) {
+            s32 px = cursor_saved_x + dx, py = cursor_saved_y + dy;
+            if (px < 0 || py < 0 || px >= scr_w() || py >= scr_h()) continue;
+            fb_putpixel(px, py, cursor_saved[dy * CUR_W + dx]);
+        }
+    cursor_saved_valid = 0;
+}
 static void draw_cursor(void) {
     s32 mx = mouse_x(), my = mouse_y();
     for (int row = 0; row < 16; row++) {
@@ -209,12 +240,56 @@ static void draw_cursor(void) {
         }
     }
 }
+/* Move the cursor without redrawing anything else. Only valid
+   when the saved pixels really are the ones under the old cursor
+   position (they are, because every full/clip redraw re-saves
+   after drawing the scene, and every cursor move re-saves after
+   restoring). If the saved position does not match, fall back to
+   a full redraw instead of restoring wrong pixels. */
+static void cursor_move_only(s32 old_mx, s32 old_my, s32 new_mx, s32 new_my);
+
+static int rects_overlap(s32 ax, s32 ay, s32 aw, s32 ah,
+                         s32 bx, s32 by, s32 bw, s32 bh) {
+    return ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
+}
+
+static void wm_redraw_rect(s32 dx, s32 dy, s32 dw, s32 dh) {
+    if (!fb_ready() || dw <= 0 || dh <= 0) return;
+    /* Background, clipped to the dirty rect only. */
+    fb_fill_rect_clip(0, 0, scr_w(), scr_h(), 0x00106040u, dx, dy, dw, dh);
+    /* Windows back-to-front, but only windows that actually overlap
+       the dirty rect. A window that does not overlap the dirty
+       rect cannot affect any pixel inside it, so skipping it is
+       safe; a window that does overlap is drawn fully (in correct
+       z-order), so the dirty area ends up exactly as a full
+       redraw would leave it. */
+    for (int zi = 0; zi < zcount; zi++) {
+        struct window *wn = &wins[zorder[zi]];
+        if (wn->minimized) continue;
+        if (!rects_overlap(wn->x, wn->y, wn->w, wn->h, dx, dy, dw, dh)) continue;
+        draw_window(zorder[zi]);
+    }
+    /* Taskbar is only 800x24 and never overlaps windows except
+       maximised ones (which stop at the taskbar), so drawing it
+       fully here is cheap and always correct. */
+    draw_taskbar();
+    cursor_save_at(mouse_x(), mouse_y());
+    draw_cursor();
+}
 
 static void wm_redraw(void) {
+    wm_redraw_rect(0, 0, scr_w(), scr_h());
+}
+
+static void cursor_move_only(s32 old_mx, s32 old_my, s32 new_mx, s32 new_my) {
+    (void)old_mx; (void)old_my;
     if (!fb_ready()) return;
-    fb_fill_rect(0, 0, scr_w(), scr_h(), 0x00106040u); /* teal background */
-    for (int zi = 0; zi < zcount; zi++) draw_window(zorder[zi]);
-    draw_taskbar();
+    if (!cursor_saved_valid || cursor_saved_x != old_mx || cursor_saved_y != old_my) {
+        wm_redraw();
+        return;
+    }
+    cursor_restore();
+    cursor_save_at(new_mx, new_my);
     draw_cursor();
 }
 
@@ -242,6 +317,12 @@ static int wm_run_internal(int autotest) {
     u32 last_redraw_ticks = timer_ticks;
     u32 start_ticks = timer_ticks;
     int auto_step = -1;
+    /* v0.7.4 throttled dirty redraw: drag/resize/key/periodic
+       changes merge into a pending dirty rect, flushed at most
+       every 3 ticks (~30 Hz). Mouse moves without drag do NOT
+       use this path — they use cursor_move_only (~442 pixels). */
+    int pending_redraw = 0;
+    s32 pend_x = 0, pend_y = 0, pend_w = 0, pend_h = 0;
     while (!exit_gui) {
         /* Autotest script (ticks are 100 Hz, steps advance every 30 ticks):
            0: move to OK button, press; 1: release (OK must click);
@@ -282,7 +363,16 @@ static int wm_run_internal(int autotest) {
                 else if (c >= 32 && c < 127 && wn->field_len < 63) {
                     wn->field[wn->field_len++] = (char)c; wn->field[wn->field_len] = 0;
                 }
-                wm_redraw();
+                /* v0.7.4: redraw only this window's rect, throttled
+                   (see flush at loop end), not the full screen. */
+                if (!pending_redraw) { pend_x = wn->x; pend_y = wn->y; pend_w = wn->w; pend_h = wn->h; pending_redraw = 1; }
+                else {
+                    s32 nx0 = pend_x < wn->x ? pend_x : wn->x;
+                    s32 ny0 = pend_y < wn->y ? pend_y : wn->y;
+                    s32 nx1 = pend_x + pend_w > wn->x + wn->w ? pend_x + pend_w : wn->x + wn->w;
+                    s32 ny1 = pend_y + pend_h > wn->y + wn->h ? pend_y + pend_h : wn->y + wn->h;
+                    pend_x = nx0; pend_y = ny0; pend_w = nx1 - nx0; pend_h = ny1 - ny0;
+                }
             }
         }
         s32 mx = mouse_x(), my = mouse_y();
@@ -351,26 +441,60 @@ static int wm_run_internal(int autotest) {
             }
         press_done:
             wm_redraw();
+            last_redraw_ticks = timer_ticks;
+            pending_redraw = 0;
         } else if (down && was_down) {
             if (drag_idx >= 0) {
                 struct window *wn = &wins[drag_idx];
+                s32 ox = wn->x, oy = wn->y, ow = wn->w, oh = wn->h;
                 s32 nx = mx - drag_dx, ny = my - drag_dy;
                 if (nx < -(wn->w - 100)) nx = -(wn->w - 100);
                 if (nx > scr_w() - 100) nx = scr_w() - 100;
                 if (ny < 0) ny = 0;
                 if (ny > scr_h() - 50) ny = scr_h() - 50;
-                if (nx != wn->x || ny != wn->y) { wn->x = nx; wn->y = ny; wm_redraw(); }
+                if (nx != wn->x || ny != wn->y) {
+                    wn->x = nx; wn->y = ny;
+                    /* Dirty = union of old and new window rects. */
+                    s32 x0 = ox < nx ? ox : nx;
+                    s32 y0 = oy < ny ? oy : ny;
+                    s32 x1 = ox + ow > nx + wn->w ? ox + ow : nx + wn->w;
+                    s32 y1 = oy + oh > ny + wn->h ? oy + oh : ny + wn->h;
+                    if (!pending_redraw) { pend_x = x0; pend_y = y0; pend_w = x1 - x0; pend_h = y1 - y0; pending_redraw = 1; }
+                    else {
+                        s32 px0 = pend_x < x0 ? pend_x : x0;
+                        s32 py0 = pend_y < y0 ? pend_y : y0;
+                        s32 px1 = pend_x + pend_w > x1 ? pend_x + pend_w : x1;
+                        s32 py1 = pend_y + pend_h > y1 ? pend_y + pend_h : y1;
+                        pend_x = px0; pend_y = py0; pend_w = px1 - px0; pend_h = py1 - py0;
+                    }
+                }
             } else if (resize_idx >= 0) {
                 struct window *wn = &wins[resize_idx];
+                s32 ox = wn->x, oy = wn->y, ow = wn->w, oh = wn->h;
                 s32 nw = mx - wn->x, nh = my - wn->y;
                 if (nw < 100) nw = 100;
                 if (nh < 80) nh = 80;
                 if (wn->x + nw > scr_w()) nw = scr_w() - wn->x;
                 if (wn->y + nh > scr_h()) nh = scr_h() - wn->y;
-                if (nw != wn->w || nh != wn->h) { wn->w = nw; wn->h = nh; wm_redraw(); }
+                if (nw != wn->w || nh != wn->h) {
+                    wn->w = nw; wn->h = nh;
+                    s32 x0 = ox < wn->x ? ox : wn->x;
+                    s32 y0 = oy < wn->y ? oy : wn->y;
+                    s32 x1 = ox + ow > wn->x + nw ? ox + ow : wn->x + nw;
+                    s32 y1 = oy + oh > wn->y + nh ? oy + oh : wn->y + nh;
+                    if (!pending_redraw) { pend_x = x0; pend_y = y0; pend_w = x1 - x0; pend_h = y1 - y0; pending_redraw = 1; }
+                    else {
+                        s32 px0 = pend_x < x0 ? pend_x : x0;
+                        s32 py0 = pend_y < y0 ? pend_y : y0;
+                        s32 px1 = pend_x + pend_w > x1 ? pend_x + pend_w : x1;
+                        s32 py1 = pend_y + pend_h > y1 ? pend_y + pend_h : y1;
+                        pend_x = px0; pend_y = py0; pend_w = px1 - px0; pend_h = py1 - py0;
+                    }
+                }
             } else if (mx != prev_mx || my != prev_my) {
-                /* Mouse moved without drag: cursor moves, redraw. */
-                wm_redraw();
+                /* Mouse moved without drag: cursor only, immediate
+                   and cheap — no full redraw (v0.7.4). */
+                cursor_move_only(prev_mx, prev_my, mx, my);
             }
         } else if (!down && was_down) {
             /* Release: trigger a pressed button only if the mouse is
@@ -399,15 +523,65 @@ static int wm_run_internal(int autotest) {
                     }
                 }
                 wm_redraw();
+                last_redraw_ticks = timer_ticks;
+                pending_redraw = 0;
             }
             drag_idx = -1; resize_idx = -1; press_button = 0; press_win = -1;
+        } else if (!down && !was_down && (mx != prev_mx || my != prev_my)) {
+            /* v0.7.4: mouse moved with the button up. In v0.7.0-0.7.3
+               this case had NO branch at all, so the cursor only
+               moved on the 0.5s periodic redraw — the main reason
+               the GUI felt like 2 fps. Now it moves immediately,
+               via cursor save/restore only. */
+            cursor_move_only(prev_mx, prev_my, mx, my);
         }
         was_down = down;
         prev_mx = mx; prev_my = my;
-        /* Periodic redraw for the System window (ticks change). */
+        /* Flush pending dirty redraw, throttled to ~30 Hz, and
+           periodic System ticks redraw (every 50 ticks, but only
+           the System window's rect, not the full screen). */
         if (timer_ticks - last_redraw_ticks >= 50) {
+            for (int i = 0; i < MAX_WINDOWS; i++) {
+                if (wins[i].used && wins[i].type == W_SYSTEM && !wins[i].minimized) {
+                    struct window *swn = &wins[i];
+                    if (!pending_redraw) { pend_x = swn->x; pend_y = swn->y; pend_w = swn->w; pend_h = swn->h; pending_redraw = 1; }
+                    else {
+                        s32 px0 = pend_x < swn->x ? pend_x : swn->x;
+                        s32 py0 = pend_y < swn->y ? pend_y : swn->y;
+                        s32 px1 = pend_x + pend_w > swn->x + swn->w ? pend_x + pend_w : swn->x + swn->w;
+                        s32 py1 = pend_y + pend_h > swn->y + swn->h ? pend_y + pend_h : swn->y + swn->h;
+                        pend_x = px0; pend_y = py0; pend_w = px1 - px0; pend_h = py1 - py0;
+                    }
+                    break;
+                }
+            }
+            /* Advance the periodic clock even if the System window
+               is minimised (nothing to update then), so this does
+               not spin every loop iteration. */
             last_redraw_ticks = timer_ticks;
-            wm_redraw();
+            /* If the periodic flush is due and the throttle window
+               has also passed, flush now below; otherwise the
+               pending rect flushes on a later tick. To avoid
+               waiting a full throttle window after a periodic
+               trigger when no other redraw happened recently, the
+               flush condition below uses its own 3-tick check
+               against the pre-periodic last_redraw value — handled
+               by not resetting last_redraw here when pending was
+               just set and the previous redraw was long ago. */
+            /* Simplify: if 50 ticks passed since the last actual
+               redraw, flush the pending rect immediately (it is
+               at most a System window rect, cheap). */
+            if (pending_redraw) {
+                if ((u32)pend_w * (u32)pend_h > 200000u) wm_redraw();
+                else wm_redraw_rect(pend_x, pend_y, pend_w, pend_h);
+                pending_redraw = 0;
+                last_redraw_ticks = timer_ticks;
+            }
+        } else if (pending_redraw && timer_ticks - last_redraw_ticks >= 3) {
+            if ((u32)pend_w * (u32)pend_h > 200000u) wm_redraw();
+            else wm_redraw_rect(pend_x, pend_y, pend_w, pend_h);
+            pending_redraw = 0;
+            last_redraw_ticks = timer_ticks;
         }
         __asm__ volatile ("hlt");
     }
@@ -416,6 +590,38 @@ static int wm_run_internal(int autotest) {
 }
 
 int wm_run(void) { return wm_run_internal(0); }
+
+int wm_cursortest(void) {
+    /* v0.7.4: prove cursor save/restore works without a real
+       mouse. Draw the demo scene, move the cursor via the same
+       save/restore path the loop uses, and check pixels: the old
+       cursor position must be restored to scene colour (not
+       white), and the new cursor position must be white. */
+    if (!fb_ready()) { console_write("cursortest: no framebuffer available\n"); return -1; }
+    init_demo();
+    /* Start on plain background (no window, no text): demo
+       windows start at x>=40, y>=40, so (10,10) is teal. */
+    mouse_test_set(10, 10, 0);
+    wm_redraw();
+    mouse_test_set(20, 20, 0);
+    cursor_move_only(10, 10, 20, 20);
+    u32 old_restored = fb_read_pixel(10, 10);
+    u32 new_cursor = fb_read_pixel(20, 20);
+    mouse_test_set(30, 30, 0);
+    cursor_move_only(20, 20, 30, 30);
+    u32 mid_restored = fb_read_pixel(20, 20);
+    u32 final_cursor = fb_read_pixel(30, 30);
+    console_printf("cursortest: old_restored=0x%x new=0x%x mid_restored=0x%x final=0x%x\n",
+                   old_restored, new_cursor, mid_restored, final_cursor);
+    /* Restored background must be teal 0x106040, cursor
+       top-left pixel must be white. */
+    int ok = (new_cursor == 0x00FFFFFFu) && (final_cursor == 0x00FFFFFFu) &&
+             (old_restored == 0x00106040u) && (mid_restored == 0x00106040u);
+    console_write(ok ? "cursortest PASS\n" : "cursortest FAIL\n");
+    mouse_test_set(400, 300, 0);
+    console_redraw_text();
+    return ok ? 0 : -1;
+}
 
 int wm_autotest(void) {
     int rc = wm_run_internal(1);

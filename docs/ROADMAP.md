@@ -386,5 +386,26 @@ with test + security reports exists in `releases/`.
   (app drops system-IME input before Bochs) — then use the app's
   built-in virtual PC keyboard or a physical keyboard, or QEMU.
 
-Current release: **v0.7.3 = bugfix on Phase 7**. Next: **Phase 8
+## v0.7.4 — Bugfix: GUI lag fixed (2026-10-27)
+- User: "gui is working but lagging like hell". Two real
+  causes in the WM loop: (1) mouse movement with the button
+  up had NO branch, so the cursor only moved on the 0.5s
+  periodic redraw (2 fps feel); (2) every other move/drag/
+  resize/key/periodic did a full 480,000-pixel redraw at up
+  to 100 Hz. Fix: cursor save/restore (~442 pixels per move,
+  immediate, button up or down), dirty-rect redraw (background
+  clipped, non-overlapping windows skipped, overlapping drawn
+  in z-order), throttling to ~30 Hz (drag/key/periodic merge
+  into a pending dirty rect), fb fill/text/char row-pointer
+  optimisations, new `cursortest` command, desktop bochsrc
+  update_freq 5 -> 30. Rendering pixel-identical: QEMU
+  screendump teal 215200 / blue 5798 / white 9671, same as
+  v0.7.0-0.7.3. QEMU PASS: v071, GUI security (rerun after
+  a "ggui" sendkey flake), base, cursortest. Bochs desktop
+  PASS: kbdstat, mem, guitest.
+- NOT measured: phone fps on Android Bochs (no Android
+  device in sandbox); improvement is argued from pixel
+  counts, not a phone fps number.
+
+Current release: **v0.7.4 = bugfix on Phase 7**. Next: **Phase 8
 desktop**.
