@@ -16,6 +16,7 @@ void fb_vbe_disable(void); /* turn VBE mode off again (text-mode fallback after 
 int  fb_verify(void); /* write/read a test pixel: 0 = framebuffer is really writable */
 void fb_disable(void); /* drop back to text mode (after a failed verify) */
 const char *fb_diag_reason(void); /* why fb_parse failed, or "ok" */
+const char *fb_parse_reason(void); /* fb_parse's own reason, preserved even after VBE fallback overwrites diag_reason */
 int  fb_diag_bpp(void); /* bpp GRUB reported, or -1 if no framebuffer info */
 int  fb_diag_type(void); /* type GRUB reported, or -1 */
 int  fb_ready(void);

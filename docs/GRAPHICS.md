@@ -129,6 +129,58 @@ start at all. Three changes, all verified in QEMU:
    with `vga: extension=vbe` (without a VBE-capable VGA, no kernel
    code can set a graphics mode).
 
+## v0.7.2 fix: GUI in Bochs, tested in Bochs itself (not just QEMU)
+
+Bochs 2.7 was installed in the build sandbox and nxtsOS was booted
+in it three ways (serial log is the source of truth, keyboard
+injected via xdotool under Xvfb/SDL2):
+
+- **stdvga + vbe extension (the correct config, shipped as
+  `config/vm/bochsrc.txt`):** v0.7.1 failed with "VBE fallback:
+  no PCI display BAR found" — Bochs' VGA here is ISA, not PCI,
+  so there is no PCI BAR to read. v0.7.2 adds the OSDev-documented
+  ISA fixed address 0xE0000000 as a second fallback step (only
+  after the Bochs VBE ID check passes, and verified by a
+  write/read test pixel after mapping, so a wrong address fails
+  cleanly to text mode instead of corrupting memory). Result:
+  "Framebuffer: 800x600, pitch 3200, phys 0xE0000000 (VBE
+  fallback)" and `guitest PASS` in Bochs, with keys typed *after*
+  the prompt, not during boot.
+- **cirrus + cirrus VGABIOS:** kernel VBE fallback correctly
+  fails ("no Bochs VBE device (ID check failed)" — Cirrus has no
+  Bochs VBE ports), and GRUB's BIOS VBE path gives garbage
+  framebuffer info in Bochs+SeaBIOS (bpp=1 type=0, with and
+  without `insmod vbe`), which the kernel correctly rejects.
+  Cirrus cannot be fixed in the kernel for 800x600x32: there is
+  no Bochs-port path and no usable BIOS path in this Bochs build.
+  Use the shipped bochsrc (vbe) instead.
+- **isavga (Bochs' default VGABIOS):** no VBE at all, same ID
+  failure, same conclusion: use the shipped bochsrc (vbe).
+
+So the Bochs rule is now proven, not guessed: **use
+`vga: extension=vbe` with a stdvga VGABIOS** (the shipped
+bochsrc). Bochs' default isavga and cirrus configs cannot run
+the GUI, in any kernel version, because they provide no usable
+graphics-mode path for 800x600x32 in Bochs 2.7 + SeaBIOS.
+
+## Keyboard in Bochs (v0.7.2)
+
+In this sandbox, Bochs keyboard IRQ delivery works: keys typed
+after the prompt (via xdotool, no early key presses) reached the
+shell and `guitest` ran. The user's report — keys only work if
+pressed repeatedly during boot — could not be reproduced here,
+but v0.7.2 removes the single point of failure it implies: the
+shell, login/lock prompts, and WM now also *poll* the keyboard
+controller (status bit 0 = output buffer full, bit 5 clear =
+keyboard data, not mouse data) on every timer wakeup (10 ms), so
+even if IRQ1 is lost, masked, or delayed in some Bochs setup,
+pending keys are still picked up. Polling is a no-op when the
+IRQ handler already consumed the byte, so QEMU/Bochs IRQ input
+is unchanged. The remaining cause to check on the user's machine
+is focus: Bochs SDL only delivers keys to the focused window —
+click inside the Bochs window after the prompt appears, then
+type. (Bochs' own manual notes the same focus behaviour.)
+
 ## What is NOT tested, stated plainly
 
 **Real mouse movement via QEMU/VNC did not work in this sandbox.**

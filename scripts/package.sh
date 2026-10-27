@@ -24,6 +24,7 @@ mkdir -p "/tmp/nxtsOS-dist-$VER"
 cp build/nxtsOS.iso "/tmp/nxtsOS-dist-$VER/"
 [ -f build/nxtsOS-disk.img ] && cp build/nxtsOS-disk.img "/tmp/nxtsOS-dist-$VER/"
 cp scripts/run_qemu.sh "/tmp/nxtsOS-dist-$VER/"
+cp config/vm/bochsrc.txt "/tmp/nxtsOS-dist-$VER/" 2>/dev/null || true
 cp tools/mkdisk.py "/tmp/nxtsOS-dist-$VER/" 2>/dev/null || true
 cp docs/VM_GUIDE.md docs/BUILD_AND_TEST.md "/tmp/nxtsOS-dist-$VER/"
 cp "releases/v$VER/MANIFEST.md" "releases/v$VER/TEST_REPORT.md" "/tmp/nxtsOS-dist-$VER/"

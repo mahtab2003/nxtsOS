@@ -29,7 +29,7 @@ void kmain(u32 magic, u32 mbi_addr) {
     serial_init();
     console_init();
     console_write("nxtsOS kernel starting\n");
-    console_write("nxtsOS v0.7.1 - original kernel, Multiboot boot\n");
+    console_write("nxtsOS v0.7.2 - original kernel, Multiboot boot\n");
     if (magic != 0x2BADB002) panic("bad Multiboot magic");
     /* Save framebuffer info NOW, before PMM can overwrite GRUB's
        Multiboot info page (see fb_parse). */
@@ -54,7 +54,15 @@ void kmain(u32 magic, u32 mbi_addr) {
        framebuffer. */
     int fb_source = 0; /* 1 = Multiboot, 2 = VBE fallback */
     if (fb_present == 0) fb_source = 1;
-    else if (fb_vbe_try() == 0) fb_source = 2;
+    else {
+        /* Keep the Multiboot failure reason visible: fb_vbe_try
+           overwrites diag_reason with its own reason, and without
+           this line a Bochs boot log could not tell whether GRUB
+           failed to set a mode or the VBE fallback failed. */
+        console_printf("Multiboot framebuffer: %s (bpp=%d type=%d)\n",
+                       fb_parse_reason(), fb_diag_bpp(), fb_diag_type());
+        if (fb_vbe_try() == 0) fb_source = 2;
+    }
     if (fb_source != 0 && fb_init() == 0 && fb_verify() == 0) {
         console_printf("Framebuffer: %ux%u, pitch %u, phys 0x%x (%s)\n",
                        fb_width(), fb_height(), fb_pitch(), fb_phys_addr(),

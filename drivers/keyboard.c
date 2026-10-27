@@ -28,8 +28,7 @@ static void push_char(char c) {
     if (next != tail) { buf[head] = c; head = next; }
 }
 
-void keyboard_irq_handler(void) {
-    u8 sc = inb(0x60);
+static void keyboard_feed(u8 sc) {
     if (sc == 0xE0) { extended = 1; return; }
     if (extended) { extended = 0; return; } /* arrows etc: ignored in v0.1.0 */
     if (sc == 0x2A || sc == 0x36) { shift = 1; return; }
@@ -41,6 +40,31 @@ void keyboard_irq_handler(void) {
         char c = shift ? shifted[sc] : normal[sc];
         if (c) push_char(c);
     }
+}
+
+void keyboard_irq_handler(void) { keyboard_feed(inb(0x60)); }
+
+/* Poll the keyboard controller for a pending key, without waiting
+   for IRQ1. v0.7.2: a user reported that in Bochs the shell only
+   accepted keys if keys had been pressed during boot — i.e. keys
+   typed after the prompt appeared were lost. In this sandbox
+   Bochs keyboard IRQ delivery works (verified via xdotool), so
+   the exact trigger in the user's Bochs setup could not be
+   reproduced, but polling removes the single point of failure:
+   the shell wakes every 10 ms on the timer IRQ, so even if IRQ1
+   is lost, masked, or delayed in some Bochs configuration, a
+   pending key is still picked up within one timer tick. The
+   status bit 5 check is essential: bit 5 set means the byte is
+   mouse data, which must be left for the mouse IRQ handler —
+   reading it here would corrupt mouse packets. If the output
+   buffer is empty, or the byte is mouse data, this is a no-op,
+   so normal IRQ-driven input is unaffected (the IRQ handler
+   already consumed the byte by the time polling runs). */
+void keyboard_poll(void) {
+    u8 status = inb(0x64);
+    if ((status & 1) == 0) return; /* output buffer empty */
+    if (status & 0x20) return; /* mouse data, not keyboard */
+    keyboard_feed(inb(0x60));
 }
 
 int keyboard_getchar(void) {

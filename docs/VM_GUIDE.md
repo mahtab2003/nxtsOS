@@ -61,3 +61,16 @@ therefore not made as a supported configuration. QEMU is the supported path.
   nxtsFS is reported, not wiped. Format only with `tools/mkdisk.py`.
 - Reboot uses the keyboard-controller reset line; on some VM configs it
   may instead require closing the VM window.
+
+
+## Bochs (v0.7.2, tested in Bochs 2.7)
+
+Use the shipped `config/vm/bochsrc.txt` (also in the dist zip):
+`bochs -q -f bochsrc.txt` (adjust the ISO and VGABIOS paths to
+your install). It sets `vga: extension=vbe` with the SeaBIOS
+stdvga VGABIOS, 32 MB RAM, CDROM boot. Do NOT use Bochs' default
+isavga VGABIOS or the cirrus extension for nxtsOS graphics —
+both were tested and cannot set 800x600x32 in Bochs 2.7 +
+SeaBIOS (see docs/GRAPHICS.md). After the shell prompt appears,
+click inside the Bochs window first, then type — Bochs SDL only
+delivers keys to the focused window.

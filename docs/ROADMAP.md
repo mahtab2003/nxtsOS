@@ -334,5 +334,29 @@ with test + security reports exists in `releases/`.
   unconditional keyboard flush on login discarded buffered
   login/help keys on first boot.
 
-Current release: **v0.7.1 = bugfix on Phase 7**. Next: **Phase 8
+## v0.7.2 — Bugfix: GUI in Bochs proven, keyboard polling (2026-10-27)
+- Bochs 2.7 installed and tested in the sandbox (Xvfb/SDL2 +
+  xdotool, serial log as truth). v0.7.1 failed in Bochs stdvga
+  with "no PCI display BAR found" (Bochs VGA is ISA, not PCI).
+  v0.7.2 adds fixed LFB 0xE0000000 as second VBE fallback step
+  (ID check first, test-pixel verification after mapping).
+  Bochs stdvga result: framebuffer 800x600 phys 0xE0000000,
+  guitest PASS, keys after prompt work. Cirrus/isavga proven
+  unfixable in kernel (no Bochs ports, GRUB BIOS path gives
+  bpp=1 type=0 in Bochs+SeaBIOS) — shipped config/vm/bochsrc.txt
+  (vbe + stdvga) is the supported Bochs config, included in dist.
+- Keyboard: shell/login/lock/WM now poll the controller every
+  timer tick in addition to IRQ1 (status bit 5 guards mouse
+  data). Bochs keyboard IRQ itself works in sandbox tests, so
+  the user's "keys only if pressed during boot" could not be
+  reproduced — polling removes the IRQ single point of failure,
+  and focus (click Bochs window, then type) is the remaining
+  check on the user's machine.
+- Boot log now prints the Multiboot failure reason with
+  bpp/type, so a future "no framebuffer" report is diagnosable.
+- QEMU PASS: v071 test, GUI security, base. GRUB `insmod vbe`
+  tested and NOT adopted (it makes GRUB set a broken 1bpp mode
+  in Bochs; kernel fallback is the reliable path).
+
+Current release: **v0.7.2 = bugfix on Phase 7**. Next: **Phase 8
 desktop**.
