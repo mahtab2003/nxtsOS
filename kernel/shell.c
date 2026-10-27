@@ -38,6 +38,83 @@ static void audit(const char *event, const char *user) {
         console_write("audit: log full or unavailable, event not recorded\n");
 }
 
+/* Persistent failed-login counts (v0.4.1), stored root-only in
+   fails.txt as lines "name:count". A reboot no longer resets the
+   brute-force counter: at 3 cumulative failures the account is locked
+   until root runs `unlock <user>`. A successful login clears the
+   count. Malformed lines are skipped, never fatal. */
+struct fail_rec { char name[32]; u32 count; };
+static struct fail_rec fails[8];
+static int fail_count = 0;
+static void fails_load(void) {
+    fail_count = 0;
+    if (!fs_mounted()) return;
+    u8 buf[512]; u32 size = 0;
+    if (fs_read("fails.txt", buf, sizeof(buf) - 1, &size) != 0) return;
+    buf[size] = 0;
+    u32 pos = 0;
+    while (pos < size && fail_count < 8) {
+        u32 ls = pos;
+        while (pos < size && buf[pos] != '\n') pos++;
+        u32 ll = pos - ls;
+        if (pos < size) pos++;
+        if (ll == 0) continue;
+        int colon = -1;
+        for (u32 i = 0; i < ll; i++) if (buf[ls + i] == ':') { colon = (int)i; break; }
+        if (colon <= 0 || colon >= 31 || ll - (u32)colon - 1 == 0) continue;
+        u32 v = 0; int bad = 0;
+        for (u32 i = (u32)colon + 1; i < ll; i++) {
+            if (buf[ls + i] < '0' || buf[ls + i] > '9' || v > 1000000) { bad = 1; break; }
+            v = v * 10u + (u32)(buf[ls + i] - '0');
+        }
+        if (bad) continue;
+        memset(&fails[fail_count], 0, sizeof(fails[fail_count]));
+        memcpy(fails[fail_count].name, buf + ls, (u32)colon);
+        fails[fail_count].count = v;
+        fail_count++;
+    }
+}
+static void fails_save(void) {
+    if (!fs_mounted()) return;
+    char out[512]; u32 i = 0;
+    for (int f = 0; f < fail_count; f++) {
+        const char *p = fails[f].name;
+        while (*p && i < sizeof(out) - 16) out[i++] = *p++;
+        if (i < sizeof(out) - 16) out[i++] = ':';
+        char num[12]; int ni = 0; u32 t = fails[f].count;
+        if (t == 0) num[ni++] = '0';
+        else { char rev[12]; int ri = 0; while (t > 0 && ri < 11) { rev[ri++] = (char)('0' + (t % 10u)); t /= 10u; } while (ri > 0) num[ni++] = rev[--ri]; }
+        for (int j = 0; j < ni && i < sizeof(out) - 16; j++) out[i++] = num[j];
+        if (i < sizeof(out) - 1) out[i++] = '\n';
+    }
+    fs_write("fails.txt", (const u8 *)out, i, 0, 0600);
+}
+static int fails_is_locked(const char *name) {
+    fails_load();
+    for (int i = 0; i < fail_count; i++)
+        if (strcmp(fails[i].name, name) == 0) return fails[i].count >= 3;
+    return 0;
+}
+static void fails_record(const char *name) {
+    fails_load();
+    for (int i = 0; i < fail_count; i++) {
+        if (strcmp(fails[i].name, name) == 0) { fails[i].count++; fails_save(); return; }
+    }
+    if (fail_count < 8) {
+        memset(&fails[fail_count], 0, sizeof(fails[fail_count]));
+        u32 j = 0; while (name[j] && j < 31) { fails[fail_count].name[j] = name[j]; j++; }
+        fails[fail_count].count = 1; fail_count++; fails_save();
+    }
+}
+static void fails_clear(const char *name) {
+    fails_load();
+    for (int i = 0; i < fail_count; i++) {
+        if (strcmp(fails[i].name, name) == 0) {
+            fails[i].count = 0; fails_save(); return;
+        }
+    }
+}
+
 /* Read one line from the keyboard. echo=1 prints chars, echo=0 prints
    nothing (passwords). Returns length. */
 static int read_line(char *buf, u32 max, int echo) {
@@ -75,8 +152,18 @@ static int do_login(void) {
         read_line(user, sizeof(user), 1);
         console_write("Password: ");
         read_line(pass, sizeof(pass), 0);
+        /* Locked accounts are rejected even with the right password.
+           The password is still prompted first, so a locked account
+           follows the same login flow as any other (and a scripted
+           login does not desynchronise). */
+        if (fails_is_locked(user)) {
+            audit("login-locked", user);
+            console_write("Account locked. Contact root to unlock.\n");
+            continue;
+        }
         u32 uid = 0;
         if (users_check(user, pass, &uid)) {
+            fails_clear(user);
             memset(session_name, 0, sizeof(session_name));
             u32 i = 0;
             while (user[i] && i < 31) { session_name[i] = user[i]; i++; }
@@ -85,6 +172,7 @@ static int do_login(void) {
             console_printf("Welcome, %s.\n", session_name);
             return 1;
         }
+        fails_record(user);
         audit("login-fail", user);
         console_write("Login incorrect\n");
     }
@@ -122,6 +210,28 @@ static int tokenize(char *line, char *tok[], char **rest) {
     return n;
 }
 
+/* Session lock prompt (shared by the idle timeout and the `lock`
+   command). Returns 1 if unlocked (session continues), 0 if the
+   unlock failed and the caller must log out. In setup mode (no users
+   file) there is no password to check, so lock is a no-op that
+   reports it and continues. */
+static int do_lock(void) {
+    if (users_count() == 0) {
+        console_write("No users configured: session lock unavailable in setup mode.\n");
+        return 1;
+    }
+    console_write("Session locked. Enter password: ");
+    char pass[64];
+    read_line(pass, sizeof(pass), 0);
+    u32 uid = 0;
+    if (users_check(session_name, pass, &uid) && uid == session_uid) {
+        console_write("Session unlocked.\n");
+        return 1;
+    }
+    console_write("Unlock failed. Logging out.\n");
+    return 0;
+}
+
 /* Returns 1 if the shell loop should exit (logout). */
 static int execute(char *line) {
     char *tok[4];
@@ -129,7 +239,7 @@ static int execute(char *line) {
     int n = tokenize(line, tok, &rest);
     if (n == 0) return 0;
     if (strcmp(tok[0], "help") == 0) {
-        console_write("Commands: help, mem, ticks, clear, reboot, fs, ls, cat <file>, write <file> <text>, rm <file>, run <file>, whoami, logout\n");
+        console_write("Commands: help, mem, ticks, clear, reboot, fs, ls, cat <file>, write <file> <text>, rm <file>, run <file>, runbg <file>, jobs, kill <pid>, lock, unlock <user>, whoami, logout\n");
     } else if (strcmp(tok[0], "mem") == 0) {
         cmd_mem();
     } else if (strcmp(tok[0], "ticks") == 0) {
@@ -144,10 +254,26 @@ static int execute(char *line) {
     } else if (strcmp(tok[0], "whoami") == 0) {
         console_printf("%s uid %u\n", session_name, session_uid);
     } else if (strcmp(tok[0], "logout") == 0) {
+        int killed = proc_bg_kill_for_uid(session_uid);
+        if (killed > 0) console_printf("Killed %u background job(s) on logout.\n", killed);
         audit("logout", session_name);
         console_write("Logged out.\n");
         session_active = 0;
         return 1;
+    } else if (strcmp(tok[0], "lock") == 0) {
+        if (!do_lock()) {
+            audit("logout", session_name);
+            session_active = 0;
+            return 1;
+        }
+        return 0;
+    } else if (strcmp(tok[0], "unlock") == 0) {
+        if (n < 2) { console_write("Usage: unlock <user>\n"); return 0; }
+        if (session_uid != 0) { console_write("unlock: root only\n"); return 0; }
+        fails_clear(tok[1]);
+        audit("unlock", tok[1]);
+        console_printf("Unlocked %s\n", tok[1]);
+        return 0;
     } else if (strcmp(tok[0], "fs") == 0) {
         fs_status();
     } else if (strcmp(tok[0], "ls") == 0) {
@@ -186,6 +312,25 @@ static int execute(char *line) {
             console_printf("run: cannot run %s\n", tok[1]);
             return 0;
         }
+    } else if (strcmp(tok[0], "runbg") == 0) {
+        if (n < 2) { console_write("Usage: runbg <file>\n"); return 0; }
+        if (proc_bg_start(tok[1], session_uid) != 0) {
+            console_printf("runbg: cannot start %s (bad file or job table full)\n", tok[1]);
+            return 0;
+        }
+    } else if (strcmp(tok[0], "jobs") == 0) {
+        proc_bg_list();
+    } else if (strcmp(tok[0], "kill") == 0) {
+        if (n < 2) { console_write("Usage: kill <pid>\n"); return 0; }
+        u32 pid = 0; int bad = 0;
+        for (const char *p = tok[1]; *p; p++) {
+            if (*p < '0' || *p > '9' || pid > 1000000) { bad = 1; break; }
+            pid = pid * 10u + (u32)(*p - '0');
+        }
+        if (bad || proc_bg_kill(pid, session_uid) != 0) {
+            console_printf("kill: cannot kill %s (no such job or no permission)\n", tok[1]);
+            return 0;
+        }
     } else {
         console_printf("Unknown command: %s (type help)\n", tok[0]);
     }
@@ -203,21 +348,24 @@ static int shell_loop(void) {
         for (;;) {
             int c = keyboard_getchar();
             if (c < 0) {
-                /* Idle session lock: 10 minutes (60000 ticks at 100 Hz).
-                   NOT QEMU-tested (waiting 10 minutes in a test is not
-                   feasible); the tick comparison is simple and reviewed,
-                   and the lock path is documented as such. */
-                if (session_active && timer_ticks - last_activity > 60000) {
-                    console_write("\nSession locked due to inactivity. Enter password: ");
-                    char pass[64];
-                    read_line(pass, sizeof(pass), 0);
-                    u32 uid = 0;
-                    if (users_count() > 0 && users_check(session_name, pass, &uid) && uid == session_uid) {
-                        console_write("Session unlocked.\n");
+                /* Background jobs run here, while the shell waits for
+                   a key: a yielding job returns immediately, a busy
+                   job returns on its 100 ms timer preemption, so the
+                   shell never blocks on a background program. */
+                proc_bg_tick();
+                /* Idle session lock: v0.4.1 raised from 10 to 30
+                   minutes (180000 ticks at 100 Hz) — 10 minutes was
+                   locking users out while they were still working
+                   with the VM. The lock/unlock code path itself is
+                   QEMU-tested via the `lock` command; waiting out
+                   30 minutes in a test is still not feasible, and
+                   that is documented as such. */
+                if (session_active && timer_ticks - last_activity > 180000) {
+                    console_write("\nSession locked due to inactivity.\n");
+                    if (do_lock()) {
                         last_activity = timer_ticks;
                         break;
                     }
-                    console_write("Unlock failed. Logging out.\n");
                     audit("logout", session_name);
                     session_active = 0;
                     return 0;
@@ -229,7 +377,13 @@ static int shell_loop(void) {
             if (c == '\n') {
                 line[len] = 0;
                 console_putchar('\n');
-                if (execute(line)) return 0;
+                int should_logout = execute(line);
+                /* A long-running command is not idle time: refresh
+                   the activity stamp after it finishes, or a user
+                   returning from a long `run` would be locked out
+                   immediately on the next prompt. */
+                last_activity = timer_ticks;
+                if (should_logout) return 0;
                 break;
             } else if (c == '\b') {
                 if (len > 0) { len--; console_putchar('\b'); }

@@ -4,9 +4,9 @@ An original, ultra-lightweight desktop operating system, built from scratch.
 Not a Linux distribution, not a fork, not a re-themed desktop: nxtsOS boots
 its own kernel.
 
-## Status — v0.4.0 (Phase 5 complete, NOT a desktop yet)
+## Status — v0.4.1 (Phase 5 + v0.4.0 limits fixed, NOT a desktop yet)
 
-What actually works in v0.4.0, verified by booting the real ISO in QEMU:
+What actually works in v0.4.1, verified by booting the real ISO in QEMU:
 
 - Multiboot boot path (GRUB), 32-bit x86 kernel written from scratch.
   The GRUB menu version is now generated from the `VERSION` file at
@@ -23,15 +23,23 @@ What actually works in v0.4.0, verified by booting the real ISO in QEMU:
   survive a guest reboot), host disk tool `tools/mkdisk.py`
 - A tiny in-kernel shell: `help`, `mem`, `ticks`, `clear`, `reboot`,
   `fs`, `ls`, `cat <file>`, `write <file> <text>`, `rm <file>`,
-  `run <file>`, `whoami`, `logout`
+  `run <file>`, `runbg <file>`, `jobs`, `kill <pid>`, `lock`,
+  `unlock <user>`, `whoami`, `logout`
 - ELF loader from disk, users/permissions, text login with sessions
   and an audit log (see `docs/SECURITY.md` for the honest limits)
+- v0.4.1 fixes over v0.4.0: 10000-iteration password hash (BREAKING:
+  regenerate users.txt with the new mkuser.py), background jobs with
+  logout cleanup, persistent brute-force lockout (root `unlock`),
+  30-minute idle lock (was 10) with a `lock` command, and a fast
+  startup test (time-based P2 busy wait, ~1.5 s, preemption proof kept).
+  Disk encryption is NOT in v0.4.1 — a real AES + key-management
+  implementation is a full phase, and a fake XOR one was not added.
 - Kernel panic path for unhandled exceptions (prints registers, halts)
 
-What is NOT in v0.3.1 — do not mistake this release for it:
+What is NOT in v0.4.1 — do not mistake this release for it:
 
 - No graphical desktop, window manager, or GUI applications yet
-- No ELF loader from disk, users/login/sessions, or package management yet
+- No package management yet
 - No networking yet
 - No installer
 
@@ -56,8 +64,8 @@ Full instructions, tested configuration, and known issues:
 `docs/VM_GUIDE.md`, `docs/BUILD_AND_TEST.md`, `releases/v0.3.0/TEST_REPORT.md`.
 
 **v0.1.0 warning:** v0.1.0 rebooted in a loop in QEMU (wrong GDT selectors
-— see `releases/v0.1.1/TEST_REPORT.md`). Do not use v0.1.0; use v0.4.0.
-QEMU tests: `tests/qemu_test_phase5.py` and `tests/security_test_phase5.py` — PASS.
+— see `releases/v0.1.1/TEST_REPORT.md`). Do not use v0.1.0; use v0.4.1.
+QEMU tests: `tests/qemu_test_phase5.py`, `tests/qemu_test_v041.py`, `tests/security_test_phase5.py`, `tests/security_test_v041.py` — all PASS.
 
 ## Project layout
 

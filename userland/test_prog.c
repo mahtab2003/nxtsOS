@@ -9,6 +9,7 @@ static int syscall2(int num, int a1) {
 static int sys_print(const char *s) { return syscall2(1, (int)s); }
 static int sys_yield(void) { return syscall2(2, 0); }
 static int sys_getpid(void) { return syscall2(4, 0); }
+static int sys_ticks(void) { return syscall2(5, 0); }
 
 int main(void) {
     int pid = sys_getpid();
@@ -21,8 +22,17 @@ int main(void) {
         if (pid == 1) {
             sys_yield();
         } else {
-            volatile unsigned long j;
-            for (j = 0; j < 50000000UL; j++) { }
+            /* v0.4.1: was 50,000,000 iterations x 5 = 250M, which took
+               tens of seconds on a slower QEMU host and delayed the
+               shell prompt, while 5,000,000 iterations finished in
+               under one 100 ms quantum on a fast host and proved
+               nothing about preemption. Time-based instead: busy-wait
+               30 ticks (300 ms) per iteration, which is always over
+               the 100 ms timer quantum regardless of host speed, so
+               P1 prints still interleave during P2's busy loop, and
+               the whole startup test takes ~1.5 s on any host. */
+            int start = sys_ticks();
+            while (sys_ticks() - start < 30) { }
         }
     }
     return 0;
