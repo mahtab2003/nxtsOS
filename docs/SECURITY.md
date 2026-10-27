@@ -1,11 +1,11 @@
 # Security
 
-Current state (v0.6.0): paging + ring-3 user mode + syscall gate are
+Current state (v0.7.0): paging + ring-3 user mode + syscall gate are
 implemented, filesystem permissions are enforced, and login/sessions
 exist. See below for what is actually enforced and what is not — the
 limits are part of the design, not footnotes.
 
-## Implemented (v0.6.0)
+## Implemented (v0.7.0)
 
 - **Privilege boundary:** user programs run in ring 3, kernel in ring 0.
   Every syscall argument is validated in kernel mode before use:
@@ -50,6 +50,14 @@ limits are part of the design, not footnotes.
   does not reset it. Root unlocks with `unlock <user>` (which also
   clears the count); a successful login clears it too. The per-boot
   3-attempt halt remains as well.
+- **Graphics/input (v0.7.0):** see `docs/GRAPHICS.md`. Framebuffer
+  drawing is clipped to the screen and to window bounds (s32
+  coordinates, never unsigned underflow), windows are clamped not
+  rejected for negative/huge coordinates, window count capped at 8,
+  mouse packets with overflow bits ignored for movement, buttons
+  only trigger on release inside the button, user programs cannot
+  access the framebuffer directly (supervisor pages, no GUI syscall
+  yet — Phase 8 will add permission checks for GUI apps).
 - **Disk encryption (v0.6.0):** see `docs/ENCRYPTION.md`. AES-256-CTR
   sector encryption, boot passphrase with key-check, 3-attempt halt,
   10000-round SHA-256 key derivation with per-disk salt. Unencrypted

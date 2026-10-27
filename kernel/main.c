@@ -4,6 +4,7 @@
 #include "shell.h"
 #include "proc.h"
 #include "enc.h"
+#include "fb.h"
 #include "../mm/pmm.h"
 #include "../mm/vmm.h"
 #include "../drivers/gdt.h"
@@ -11,6 +12,7 @@
 #include "../drivers/pic.h"
 #include "../drivers/pit.h"
 #include "../drivers/keyboard.h"
+#include "../drivers/mouse.h"
 #include "../drivers/serial.h"
 #include "../fs/vfs.h"
 
@@ -27,8 +29,11 @@ void kmain(u32 magic, u32 mbi_addr) {
     serial_init();
     console_init();
     console_write("nxtsOS kernel starting\n");
-    console_write("nxtsOS v0.6.0 - original kernel, Multiboot boot\n");
+    console_write("nxtsOS v0.7.0 - original kernel, Multiboot boot\n");
     if (magic != 0x2BADB002) panic("bad Multiboot magic");
+    /* Save framebuffer info NOW, before PMM can overwrite GRUB's
+       Multiboot info page (see fb_parse). */
+    int fb_present = fb_parse(mbi_addr);
     struct multiboot_info *mbi = (struct multiboot_info *)mbi_addr;
     console_printf("Multiboot: mem_lower=%uK mem_upper=%uK mmap_len=%u\n",
                    mbi->mem_lower, mbi->mem_upper, mbi->mmap_length);
@@ -40,10 +45,22 @@ void kmain(u32 magic, u32 mbi_addr) {
     console_write("GDT installed (kernel 0x08/0x10, user 0x18/0x20, TSS 0x28)\n");
     vmm_init();
     console_write("Paging enabled (kernel identity-mapped 0-32 MB)\n");
+    /* Framebuffer: after paging, so its physical pages can be mapped.
+       If GRUB did not set a graphics mode, this fails cleanly and
+       the system continues in VGA text mode. */
+    if (fb_present == 0 && fb_init() == 0) {
+        console_printf("Framebuffer: %ux%u, pitch %u, phys 0x%x\n",
+                       fb_width(), fb_height(), fb_pitch(), fb_phys_addr());
+        console_switch_to_fb();
+    } else {
+        console_write("Framebuffer: not available (text mode)\n");
+    }
     idt_init();
     pic_init();
     pit_init();
     keyboard_init();
+    if (mouse_init()) console_write("Mouse: PS/2 mouse detected\n");
+    else console_write("Mouse: not detected (GUI cursor will not move)\n");
     __asm__ volatile ("sti");
     console_write("Interrupts enabled\n");
     /* Disk encryption unlock, before any filesystem access: an

@@ -4,9 +4,9 @@ An original, ultra-lightweight desktop operating system, built from scratch.
 Not a Linux distribution, not a fork, not a re-themed desktop: nxtsOS boots
 its own kernel.
 
-## Status — v0.6.0 (Disk encryption, NOT a desktop yet)
+## Status — v0.7.0 (Graphics + window manager, NOT a desktop shell yet)
 
-What actually works in v0.6.0, verified by booting the real ISO in QEMU:
+What actually works in v0.7.0, verified by booting the real ISO in QEMU:
 
 - Multiboot boot path (GRUB), 32-bit x86 kernel written from scratch.
   The GRUB menu version is now generated from the `VERSION` file at
@@ -27,6 +27,14 @@ What actually works in v0.6.0, verified by booting the real ISO in QEMU:
   `unlock <user>`, `whoami`, `logout`
 - ELF loader from disk, users/permissions, text login with sessions
   and an audit log (see `docs/SECURITY.md` for the honest limits)
+- Graphics + window manager: see `docs/GRAPHICS.md`. 800x600x32
+  framebuffer, 8x16 font, framebuffer text console, PS/2 mouse,
+  in-kernel window manager (`gui` command: move/resize/minimise/
+  maximise/close/focus/taskbar, button/label/text-field widgets).
+  Real mouse movement via QEMU/VNC was NOT testable in the build
+  sandbox (QEMU did not inject mouse packets) — test `gui` with a
+  real mouse on your machine; driver + WM click/drag logic are
+  proven via `mousetest`/`wmautotest`.
 - Disk encryption (AES-256-CTR, boot passphrase): see
   `docs/ENCRYPTION.md`. Encrypted disks are created on the host with
   `tools/mkdisk_enc.py` (needs openssl) and unlock at boot with a
@@ -45,7 +53,7 @@ What actually works in v0.6.0, verified by booting the real ISO in QEMU:
   implementation is a full phase, and a fake XOR one was not added.
 - Kernel panic path for unhandled exceptions (prints registers, halts)
 
-What is NOT in v0.6.0 — do not mistake this release for it:
+What is NOT in v0.7.0 — do not mistake this release for it:
 
 - No graphical desktop, window manager, or GUI applications yet
 - No graphics, desktop, or networking yet
@@ -73,8 +81,8 @@ Full instructions, tested configuration, and known issues:
 `docs/VM_GUIDE.md`, `docs/BUILD_AND_TEST.md`, `releases/v0.3.0/TEST_REPORT.md`.
 
 **v0.1.0 warning:** v0.1.0 rebooted in a loop in QEMU (wrong GDT selectors
-— see `releases/v0.1.1/TEST_REPORT.md`). Do not use v0.1.0; use v0.6.0.
-QEMU tests: `tests/qemu_test_enc.py`, `tests/security_test_enc.py`, plus package, Phase 5, v0.4.1, security, base, and storage regressions — all PASS.
+— see `releases/v0.1.1/TEST_REPORT.md`). Do not use v0.1.0; use v0.7.0.
+QEMU tests: `tests/security_test_gui.py`, `tests/qemu_test_enc.py`, `tests/security_test_enc.py`, plus package, Phase 5, base, and storage regressions — all PASS.
 
 ## Project layout
 

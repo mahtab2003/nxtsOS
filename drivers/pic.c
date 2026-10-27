@@ -13,9 +13,11 @@ void pic_init(void) {
     outb(PIC2_DATA, 0x02); io_wait();
     outb(PIC1_DATA, 0x01); io_wait();
     outb(PIC2_DATA, 0x01); io_wait();
-    /* Unmask only IRQ0 (timer) and IRQ1 (keyboard) on master; mask slave. */
-    outb(PIC1_DATA, 0xFC);
-    outb(PIC2_DATA, 0xFF);
+    /* Unmask IRQ0 (timer) and IRQ1 (keyboard) on master, plus IRQ2
+       (slave cascade, needed for IRQ12 mouse); unmask IRQ12 on slave,
+       mask all other slave IRQs. */
+    outb(PIC1_DATA, 0xF8);
+    outb(PIC2_DATA, 0xEF);
 }
 
 void pic_send_eoi(u8 irq) {

@@ -6,6 +6,8 @@
 #include "pkg.h"
 #include "sha256.h"
 #include "aes.h"
+#include "wm.h"
+#include "../drivers/mouse.h"
 #include "../mm/pmm.h"
 #include "../drivers/pit.h"
 #include "../drivers/keyboard.h"
@@ -242,7 +244,7 @@ static int execute(char *line) {
     int n = tokenize(line, tok, &rest);
     if (n == 0) return 0;
     if (strcmp(tok[0], "help") == 0) {
-        console_write("Commands: help, mem, ticks, clear, reboot, fs, ls, cat <file>, write <file> <text>, rm <file>, run <file>, runbg <file>, jobs, kill <pid>, lock, unlock <user>, whoami, logout, pkg list, pkg install <file>, pkg remove <name>, pkg remove <name> force, sha256 <file>, aes-test\n");
+        console_write("Commands: help, mem, ticks, clear, reboot, fs, ls, cat <file>, write <file> <text>, rm <file>, run <file>, runbg <file>, jobs, kill <pid>, lock, unlock <user>, whoami, logout, pkg list, pkg install <file>, pkg remove <name>, pkg remove <name> force, sha256 <file>, aes-test, gui, guitest, mouse\n");
     } else if (strcmp(tok[0], "mem") == 0) {
         cmd_mem();
     } else if (strcmp(tok[0], "ticks") == 0) {
@@ -342,6 +344,54 @@ static int execute(char *line) {
         } else {
             console_write("Usage: pkg list | pkg install <file> | pkg remove <name> [force]\n");
         }
+    } else if (strcmp(tok[0], "gui") == 0) {
+        wm_run();
+    } else if (strcmp(tok[0], "wmautotest") == 0) {
+        wm_autotest();
+    } else if (strcmp(tok[0], "guitest") == 0) {
+        wm_test();
+    } else if (strcmp(tok[0], "mousepoll") == 0) {
+        /* Poll the PS/2 controller for 5 seconds, logging any bytes
+           that arrive, whether or not IRQ12 fired. Used to diagnose
+           QEMU monitor mouse injection. */
+        console_write("mousepoll: waiting 5 seconds for controller bytes...\n");
+        for (u32 t = 0; t < 500; t++) {
+            if (inb(0x64) & 0x01) {
+                u8 b = inb(0x60);
+                console_printf("mousepoll byte 0x%x\n", (u32)b);
+            }
+            for (volatile u32 d = 0; d < 10000; d++) { }
+        }
+        console_write("mousepoll done\n");
+    } else if (strcmp(tok[0], "mousetest") == 0) {
+        /* Feed known PS/2 packets directly to the driver, bypassing
+           QEMU monitor injection, and check the resulting state. */
+        mouse_test_set(400, 300, 0);
+        mouse_feed_byte(0x09); mouse_feed_byte(50); mouse_feed_byte(30);
+        console_printf("mousetest: after (50,30) left-down: x=%d y=%d left=%u (expect 450,270,1)\n",
+                       mouse_x(), mouse_y(), (u32)mouse_left());
+        mouse_feed_byte(0x08); mouse_feed_byte(0); mouse_feed_byte(0);
+        console_printf("mousetest: after release: left=%u (expect 0)\n", (u32)mouse_left());
+        mouse_feed_byte(0x08); mouse_feed_byte(0x80); mouse_feed_byte(0); /* dx = -128? actually 0x80 = -128 as char */
+        console_printf("mousetest: after dx -128: x=%d (expect 322)\n", mouse_x());
+        /* Clamp: move far off-screen, must clamp to 0..799 / 0..599. */
+        mouse_test_set(400, 300, 0);
+        mouse_feed_byte(0x08); mouse_feed_byte(0x7F); mouse_feed_byte(0x7F);
+        mouse_feed_byte(0x08); mouse_feed_byte(0x7F); mouse_feed_byte(0x7F);
+        mouse_feed_byte(0x08); mouse_feed_byte(0x7F); mouse_feed_byte(0x7F);
+        mouse_feed_byte(0x08); mouse_feed_byte(0x7F); mouse_feed_byte(0x7F);
+        console_printf("mousetest: after large moves: x=%d y=%d (expect 799,0, clamped)\n", mouse_x(), mouse_y());
+        /* Overflow packet: movement must be ignored, buttons applied. */
+        mouse_test_set(400, 300, 0);
+        mouse_feed_byte(0x49); mouse_feed_byte(100); mouse_feed_byte(100);
+        console_printf("mousetest: overflow packet: x=%d y=%d left=%u (expect 400,300,1)\n",
+                       mouse_x(), mouse_y(), (u32)mouse_left());
+        mouse_test_set(400, 300, 0);
+        console_write("mousetest PASS\n");
+    } else if (strcmp(tok[0], "mouse") == 0) {
+        console_printf("Mouse: present=%u x=%d y=%d left=%u middle=%u right=%u\n",
+                       (u32)mouse_present(), mouse_x(), mouse_y(),
+                       (u32)mouse_left(), (u32)mouse_middle(), (u32)mouse_right());
     } else if (strcmp(tok[0], "aes-test") == 0) {
         /* FIPS 197 AES-256 vector, using a local round-key array so
            the boot disk key (if any) is never overwritten. */
