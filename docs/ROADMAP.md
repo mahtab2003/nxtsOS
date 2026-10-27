@@ -358,5 +358,33 @@ with test + security reports exists in `releases/`.
   tested and NOT adopted (it makes GRUB set a broken 1bpp mode
   in Bochs; kernel fallback is the reliable path).
 
-Current release: **v0.7.2 = bugfix on Phase 7**. Next: **Phase 8
+## v0.7.3 — Bugfix: PS/2 controller init, keyboard deadlock fixed (2026-10-27)
+- User video (Android Bochs, VGA Bochs VBE (PCI) + Slot1 pcivga):
+  framebuffer WAS working (800x600, pitch 3200, phys 0xC0000000,
+  Multiboot) — the failure in the video was keyboard input: the
+  Android soft keyboard opened, keys were tapped, nothing appeared
+  at the prompt, so `gui` could never be run. Root cause in kernel:
+  keyboard_init() never touched the PS/2 controller, so a byte
+  left in its 1-byte output buffer by GRUB/BIOS stayed forever
+  (PIC reinitialisation forgot its IRQ, full buffer accepts no
+  new bytes, raises no new IRQ) — keyboard dead from first prompt,
+  on any emulator, until the buffer is read. Mashing Enter during
+  loading sometimes cleared it. Fix: proper controller init
+  (disable ports, flush, config byte IRQ1+IRQ12+translation,
+  re-enable kbd port, flush, scancode set 2), polling now drains
+  mouse bytes too, mouse packet resync (test_set resets pkt_idx,
+  bit-3-clear first bytes discarded — found by mousetest failing
+  after the polling change), shell diagnostic line + `kbdstat`.
+- QEMU PASS: v071, GUI security, base, encryption, package,
+  GRUB-phase key test. Bochs desktop PASS: kbdstat, mem, guitest.
+  QEMU does NOT reproduce the deadlock (GRUB consumes the key),
+  so QEMU tests prove no regression, not the Bochs fix.
+- NOT tested: Android Bochs on a real phone (no Android device
+  in sandbox). The shell diagnostic line tells the user which
+  case applies: drained > 0 = lodged byte fixed by this build;
+  drained = 0 + keys still dead = no bytes reach the controller
+  (app drops system-IME input before Bochs) — then use the app's
+  built-in virtual PC keyboard or a physical keyboard, or QEMU.
+
+Current release: **v0.7.3 = bugfix on Phase 7**. Next: **Phase 8
 desktop**.

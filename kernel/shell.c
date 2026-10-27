@@ -266,7 +266,7 @@ static int execute(char *line) {
     int n = tokenize(line, tok, &rest);
     if (n == 0) return 0;
     if (strcmp(tok[0], "help") == 0) {
-        console_write("Commands: help, mem, ticks, clear, reboot, fs, ls, cat <file>, write <file> <text>, rm <file>, run <file>, runbg <file>, jobs, kill <pid>, lock, unlock <user>, whoami, logout, idle [minutes|off], fbinfo, pkg list, pkg install <file>, pkg remove <name>, pkg remove <name> force, sha256 <file>, aes-test, gui, guitest, mouse\n");
+        console_write("Commands: help, mem, ticks, clear, reboot, fs, ls, cat <file>, write <file> <text>, rm <file>, run <file>, runbg <file>, jobs, kill <pid>, lock, unlock <user>, whoami, logout, idle [minutes|off], fbinfo, kbdstat, pkg list, pkg install <file>, pkg remove <name>, pkg remove <name> force, sha256 <file>, aes-test, gui, guitest, mouse\n");
     } else if (strcmp(tok[0], "idle") == 0) {
         if (n < 2) {
             if (idle_timeout_minutes == 0) console_write("Idle timeout: disabled (never locks on idle)\n");
@@ -291,6 +291,20 @@ static int execute(char *line) {
         else console_printf("Framebuffer: not available - %s (GRUB bpp=%d type=%d)\n",
                             fb_diag_reason(), fb_diag_bpp(), fb_diag_type());
         console_write("If this says no framebuffer in Bochs, check the emulator's VGA settings (Bochs needs vga extension=vbe) or try QEMU with -vga std.\n");
+    } else if (strcmp(tok[0], "kbdstat") == 0) {
+        /* v0.7.3 diagnostic, no typing needed to read it once the
+           shell is up: controller status byte (bit 0 = output
+           buffer full, bit 5 = next byte is mouse data), bytes
+           drained at startup, and the last raw scancode received.
+           If keys are typed and last-scancode never changes, no
+           bytes are reaching the controller at all (emulator/app
+           drops them before the guest) and no kernel change can
+           fix that; if it changes but no characters appear, the
+           scancode set/translation is wrong. */
+        console_printf("Keyboard: controller status=0x%x startup-drained=%u last-scancode=0x%x\n",
+                       (u32)keyboard_controller_status(),
+                       keyboard_startup_drained(),
+                       (u32)keyboard_last_scancode());
     } else if (strcmp(tok[0], "mem") == 0) {
         cmd_mem();
     } else if (strcmp(tok[0], "ticks") == 0) {
@@ -501,6 +515,20 @@ static int shell_loop(void) {
     u32 len = 0;
     u32 last_activity = timer_ticks;
     console_write("\nWelcome to nxtsOS. Type help.\n");
+    /* v0.7.3: one line, first shell only, so a user testing on
+       Bochs/QEMU can report it without typing anything: if this
+       says drained > 0, a lodged GRUB/BIOS byte was the keyboard
+       failure and this build already drained it. If it says 0
+       and keys still do nothing, no bytes are reaching the
+       controller at all (emulator/app side, see VM_GUIDE). */
+    {
+        static int shell_diag_shown = 0;
+        if (!shell_diag_shown) {
+            shell_diag_shown = 1;
+            console_printf("Keyboard: startup drained %u byte(s) from the PS/2 controller (0 = controller was clean at boot).\n",
+                           keyboard_startup_drained());
+        }
+    }
     for (;;) {
         console_printf("%s@nxts> ", session_name);
         len = 0;

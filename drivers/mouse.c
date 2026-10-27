@@ -52,8 +52,14 @@ int mouse_init(void) {
 /* Test-only: set mouse state directly, bypassing PS/2 packets.
    Used by wm_autotest to script clicks/drags without relying on
    QEMU monitor mouse injection (which did not deliver packets in
-   this sandbox, see docs/GRAPHICS.md). */
+   this sandbox, see docs/GRAPHICS.md). v0.7.3: also reset the
+   packet assembly index. A stray mouse byte drained by polling
+   before a test (e.g. a lodged init byte) otherwise leaves
+   pkt_idx at 1 or 2, and every test packet is then grouped
+   wrongly — that is why mousetest failed after the v0.7.3
+   polling change, while the mouse driver itself was fine. */
 void mouse_test_set(s32 x, s32 y, int left_btn) {
+    pkt_idx = 0;
     mx = x; my = y;
     if (left_btn && !left) left_edge = 1;
     left = left_btn;
@@ -63,8 +69,15 @@ void mouse_irq_handler(void) {
     mouse_feed_byte(inb(0x60));
 }
 
-/* Packet assembly, shared by IRQ handler and mousetest injection. */
+/* Packet assembly, shared by IRQ handler and mousetest injection.
+   v0.7.3 resync: a first byte without bit 3 set cannot be a valid
+   packet start, so it is discarded immediately instead of starting
+   a packet that would shift every following packet by one byte.
+   A stray byte (e.g. drained by polling before a test) then
+   costs at most one discarded byte, not a permanently misaligned
+   packet stream. */
 void mouse_feed_byte(u8 b) {
+    if (pkt_idx == 0 && (b & 0x08) == 0) return;
     packet[pkt_idx++] = b;
     if (pkt_idx < 3) return;
     pkt_idx = 0;

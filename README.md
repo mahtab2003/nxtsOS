@@ -4,9 +4,9 @@ An original, ultra-lightweight desktop operating system, built from scratch.
 Not a Linux distribution, not a fork, not a re-themed desktop: nxtsOS boots
 its own kernel.
 
-## Status — v0.7.2 (Graphics + window manager, NOT a desktop shell yet)
+## Status — v0.7.3 (Graphics + window manager, NOT a desktop shell yet)
 
-What actually works in v0.7.2, verified by booting the real ISO in QEMU and in Bochs 2.7:
+What actually works in v0.7.3, verified by booting the real ISO in QEMU and in Bochs 2.7:
 
 - Multiboot boot path (GRUB), 32-bit x86 kernel written from scratch.
   The GRUB menu version is now generated from the `VERSION` file at
@@ -94,7 +94,7 @@ Full instructions, tested configuration, and known issues:
 `docs/VM_GUIDE.md`, `docs/BUILD_AND_TEST.md`, `releases/v0.3.0/TEST_REPORT.md`.
 
 **v0.1.0 warning:** v0.1.0 rebooted in a loop in QEMU (wrong GDT selectors
-— see `releases/v0.1.1/TEST_REPORT.md`). Do not use v0.1.0; use v0.7.2.
+— see `releases/v0.1.1/TEST_REPORT.md`). Do not use v0.1.0; use v0.7.3.
 QEMU tests: `tests/security_test_gui.py`, `tests/qemu_test_enc.py`, `tests/security_test_enc.py`, plus package, Phase 5, base, and storage regressions — all PASS.
 
 ## Project layout

@@ -29,7 +29,7 @@ void kmain(u32 magic, u32 mbi_addr) {
     serial_init();
     console_init();
     console_write("nxtsOS kernel starting\n");
-    console_write("nxtsOS v0.7.2 - original kernel, Multiboot boot\n");
+    console_write("nxtsOS v0.7.3 - original kernel, Multiboot boot\n");
     if (magic != 0x2BADB002) panic("bad Multiboot magic");
     /* Save framebuffer info NOW, before PMM can overwrite GRUB's
        Multiboot info page (see fb_parse). */
@@ -79,6 +79,12 @@ void kmain(u32 magic, u32 mbi_addr) {
     keyboard_init();
     if (mouse_init()) console_write("Mouse: PS/2 mouse detected\n");
     else console_write("Mouse: not detected (GUI cursor will not move)\n");
+    /* v0.7.3: drain once more after mouse_init, so a mouse byte
+       left behind by its ACK exchange cannot lodge in the 1-byte
+       output buffer and block the keyboard. The total drained at
+       startup is reported at the first shell prompt (see shell),
+       so a user can tell whether lodged bytes were the problem. */
+    (void)keyboard_drain_controller();
     __asm__ volatile ("sti");
     console_write("Interrupts enabled\n");
     /* Disk encryption unlock, before any filesystem access: an
