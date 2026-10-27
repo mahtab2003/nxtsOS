@@ -153,3 +153,28 @@ delivers keys to the focused window.
   host-side latency, and a USB tablet (absolute mouse) is
   impossible without a USB driver, which nxtsOS does not
   have yet.
+
+## Networking (v0.9.0)
+
+- QEMU needs a network device: add `-netdev user,id=n0
+  -device e1000,netdev=n0` (slirp) or a socket peer.
+  Without any NIC the boot still succeeds; `netinfo`
+  will simply report no device.
+- At the shell prompt: `dhcp` first (slirp gives
+  10.0.2.15), then `ping 10.0.2.2`,
+  `http 10.0.2.2 /test.txt 18080` (host server on
+  127.0.0.1:18080), `https 10.0.2.2 / 8443` (host TLS
+  server on 127.0.0.1:8443). `dnsset <ip>` overrides
+  the DNS server; `nettest` runs the malformed-frame
+  injection suite.
+- TLS limits (do not skip): no CA trust store ships —
+  the server certificate chain must end in a
+  self-signed root (TOFU, not CA authentication), and
+  the client's randomness is not cryptographic. See
+  docs/NETWORKING.md before using `https` for anything
+  real.
+- Slirp DNS (10.0.2.3) does not work everywhere: if
+  the host blocks outbound UDP, slirp answers DNS with
+  ICMP net-unreachable even though the guest's query
+  is correct. That is a host/sandbox limit, not a
+  guest bug.

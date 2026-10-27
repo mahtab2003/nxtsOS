@@ -40,6 +40,14 @@ void *memcpy(void *dst, const void *src, u32 n) {
     return dst;
 }
 
+void *memmove(void *dst, const void *src, u32 n) {
+    u8 *d = (u8 *)dst;
+    const u8 *s = (const u8 *)src;
+    if (d < s) { for (u32 i = 0; i < n; i++) d[i] = s[i]; }
+    else if (d > s) { for (u32 i = n; i > 0; i--) d[i - 1] = s[i - 1]; }
+    return dst;
+}
+
 void u32_to_str(u32 v, char *buf, int base) {
     /* Only bases 10 and 16 are used. Both are handled without a runtime
        division call, so the kernel links without libgcc (no 32-bit libgcc

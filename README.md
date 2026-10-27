@@ -4,7 +4,34 @@ An original, ultra-lightweight desktop operating system, built from scratch.
 Not a Linux distribution, not a fork, not a re-themed desktop: nxtsOS boots
 its own kernel.
 
-## Status — v0.8.0 (Phase 8: first desktop shell + Calculator package)
+## Status — v0.9.0 (Phase 9: networking + TLS 1.2 client)
+
+What actually works in v0.9.0, verified by booting the real ISO in QEMU and in Bochs 2.7:
+
+- Everything from v0.8.0, plus a real network stack: e1000
+  driver (polled), ARP, IPv4, ICMP, UDP, DHCP, DNS, a
+  single-connection TCP client, and an HTTP/1.0 client.
+  Shell commands: `netinfo`, `netdbg`, `dhcp`,
+  `ping <ip>`, `dns <name>`, `dnsset <ip>`, `http`,
+  `https`, `nettest`. Try it under QEMU slirp:
+  `dhcp`, then `ping 10.0.2.2`, then `http`/`https`
+  against a host server (see docs/NETWORKING.md).
+- A TLS 1.2 client with real X.509 verification (one
+  suite: TLS_RSA_WITH_AES_128_GCM_SHA256, RSA key
+  exchange, AES-128-GCM records, SAN hostname matching,
+  RSA signature verification via a from-scratch bignum).
+  Verified against real OpenSSL servers. Honest limits,
+  stated plainly: NO CA trust store ships (chains must
+  end in a self-signed root — TOFU, not CA
+  authentication), and randomness is a timer-seeded
+  xorshift, not a cryptographic RNG. Do not use it for
+  real secrets yet; see docs/NETWORKING.md.
+- Adversarial network testing passed: a 400-frame
+  flood does not wedge the stack, malformed DNS
+  pointers are rejected, and wrong-host, tampered, and
+  expired TLS certificates are all refused (while plain
+  HTTP on a TLS port fails as a handshake error, not
+  misreported as a certificate refusal).
 
 What actually works in v0.8.0, verified by booting the real ISO in QEMU and in Bochs 2.7:
 

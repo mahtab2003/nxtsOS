@@ -61,7 +61,26 @@ void aes256_expand(const u8 key[32], u32 rk[60]) {
     }
 }
 
-void aes256_encrypt(const u32 rk[60], const u8 in[16], u8 out[16]) {
+void aes128_expand(const u8 key[16], u32 rk[44]) {
+    sbox_init();
+    for (int i = 0; i < 4; i++)
+        rk[i] = ((u32)key[i*4] << 24) | ((u32)key[i*4+1] << 16) |
+                ((u32)key[i*4+2] << 8) | (u32)key[i*4+3];
+    for (int i = 4; i < 44; i++) {
+        u32 temp = rk[i-1];
+        if (i % 4 == 0) {
+            u32 rot = (temp << 8) | (temp >> 24);
+            u32 sub = ((u32)sbox[(rot >> 24) & 0xFF] << 24) |
+                      ((u32)sbox[(rot >> 16) & 0xFF] << 16) |
+                      ((u32)sbox[(rot >> 8) & 0xFF] << 8) |
+                      (u32)sbox[rot & 0xFF];
+            temp = sub ^ ((u32)rcon(i / 4) << 24);
+        }
+        rk[i] = rk[i-4] ^ temp;
+    }
+}
+
+static void aes_encrypt_nr(const u32 *rk, const u8 in[16], u8 out[16], int nr) {
     sbox_init();
     /* State is column-major: state[r][c] = in[r + 4*c]. */
     u8 s[4][4];
@@ -71,7 +90,7 @@ void aes256_encrypt(const u32 rk[60], const u8 in[16], u8 out[16]) {
         u32 w = rk[c];
         for (int r = 0; r < 4; r++) s[r][c] ^= (u8)((w >> (24 - r*8)) & 0xFF);
     }
-    for (int round = 1; round <= 14; round++) {
+    for (int round = 1; round <= nr; round++) {
         /* SubBytes. */
         for (int c = 0; c < 4; c++) for (int r = 0; r < 4; r++) s[r][c] = sbox[s[r][c]];
         /* ShiftRows: row r shifts left by r. */
@@ -80,7 +99,7 @@ void aes256_encrypt(const u32 rk[60], const u8 in[16], u8 out[16]) {
             for (int c = 0; c < 4; c++) tmp[c] = s[r][(c + r) % 4];
             for (int c = 0; c < 4; c++) s[r][c] = tmp[c];
         }
-        if (round < 14) {
+        if (round < nr) {
             /* MixColumns. */
             for (int c = 0; c < 4; c++) {
                 u8 a0 = s[0][c], a1 = s[1][c], a2 = s[2][c], a3 = s[3][c];
@@ -97,4 +116,11 @@ void aes256_encrypt(const u32 rk[60], const u8 in[16], u8 out[16]) {
         }
     }
     for (int c = 0; c < 4; c++) for (int r = 0; r < 4; r++) out[r + 4*c] = s[r][c];
+}
+
+void aes256_encrypt(const u32 rk[60], const u8 in[16], u8 out[16]) {
+    aes_encrypt_nr(rk, in, out, 14);
+}
+void aes128_encrypt(const u32 rk[44], const u8 in[16], u8 out[16]) {
+    aes_encrypt_nr(rk, in, out, 10);
 }
