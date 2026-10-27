@@ -63,6 +63,21 @@ static int valid_entry(struct dir_entry *e) {
     }
     return 1;
 }
+
+static int is_system_file(const char *name) {
+    return strcmp(name, "users.txt") == 0 || strcmp(name, "audit.log") == 0;
+}
+static int can_read_entry(struct dir_entry *e, u32 uid) {
+    if (uid == 0) return 1;
+    if (strcmp(e->name, "audit.log") == 0) return 0;
+    if (e->uid == uid) return (e->mode >> 6) & 4;
+    return e->mode & 4;
+}
+static int can_write_entry(struct dir_entry *e, u32 uid) {
+    if (uid == 0) return 1;
+    if (e->uid == uid) return (e->mode >> 6) & 2;
+    return e->mode & 2;
+}
 static int find_entry(const char *name) {
     for (int i = 0; i < FS_MAX_FILES; i++) {
         if (!valid_entry(&dir[i])) continue;
@@ -160,11 +175,12 @@ u32 fs_free_sectors(void) {
     return free;
 }
 
-int fs_list(void) {
+int fs_list_as(u32 uid) {
     if (!mounted) return -1;
     int count = 0;
     for (int i = 0; i < FS_MAX_FILES; i++) {
         if (!valid_entry(&dir[i])) continue;
+        if (!can_read_entry(&dir[i], uid)) continue;
         console_printf("%s  %u bytes  uid %u  mode %u\n",
                        dir[i].name, dir[i].size, dir[i].uid, dir[i].mode);
         count++;
@@ -172,12 +188,14 @@ int fs_list(void) {
     if (count == 0) console_write("(no files)\n");
     return count;
 }
+int fs_list(void) { return fs_list_as(0); }
 
-int fs_read(const char *name, u8 *buf, u32 buf_size, u32 *out_size) {
+int fs_read_as(const char *name, u8 *buf, u32 buf_size, u32 *out_size, u32 uid) {
     if (!mounted || !valid_name(name)) return -1;
     int idx = find_entry(name);
     if (idx < 0) return -1;
     struct dir_entry *e = &dir[idx];
+    if (!can_read_entry(e, uid)) return -1;
     if (e->size > buf_size) return -1;
     u32 done = 0;
     for (u32 i = 0; i < e->sector_count && done < e->size; i++) {
@@ -190,9 +208,18 @@ int fs_read(const char *name, u8 *buf, u32 buf_size, u32 *out_size) {
     *out_size = done;
     return 0;
 }
+int fs_read(const char *name, u8 *buf, u32 buf_size, u32 *out_size) {
+    return fs_read_as(name, buf, buf_size, out_size, 0);
+}
 
-int fs_write(const char *name, const u8 *data, u32 len, u32 uid, u32 mode) {
+int fs_write_as(const char *name, const u8 *data, u32 len, u32 uid, u32 mode) {
     if (!mounted || !valid_name(name) || mode > 0777) return -1;
+    int existing = find_entry(name);
+    if (existing >= 0) {
+        if (!can_write_entry(&dir[existing], uid)) return -1;
+    } else if (uid != 0 && is_system_file(name)) {
+        return -1; /* only root may create system files */
+    }
     u32 need = (len + 511) / 512;
     if (need == 0) need = 1;
     u32 start = 0;
@@ -236,14 +263,36 @@ int fs_write(const char *name, const u8 *data, u32 len, u32 uid, u32 mode) {
     return 0;
 }
 
-int fs_delete(const char *name) {
+int fs_write(const char *name, const u8 *data, u32 len, u32 uid, u32 mode) {
+    return fs_write_as(name, data, len, uid, mode);
+}
+
+int fs_delete_as(const char *name, u32 uid) {
     if (!mounted || !valid_name(name)) return -1;
     int idx = find_entry(name);
     if (idx < 0) return -1;
+    if (!can_write_entry(&dir[idx], uid)) return -1;
     struct dir_entry *e = &dir[idx];
     for (u32 i = 0; i < e->sector_count; i++) bit_set(e->start_sector + i, 0);
     memset(e, 0, sizeof(*e));
     if (save_bitmap() != 0) return -1;
     if (save_dir() != 0) return -1;
     return 0;
+}
+
+int fs_delete(const char *name) { return fs_delete_as(name, 0); }
+
+int fs_append(const char *name, const u8 *data, u32 len) {
+    /* Root-only append for the audit log. Total size is capped so a
+       runaway log cannot fill the disk; when full it stops logging
+       (and the caller prints a warning) instead of truncating history. */
+    if (!mounted || !valid_name(name) || len == 0) return -1;
+    u8 old[4096];
+    u32 old_size = 0;
+    if (find_entry(name) >= 0) {
+        if (fs_read_as(name, old, sizeof(old), &old_size, 0) != 0) return -1;
+    }
+    if (old_size + len > 4096) return -1;
+    memcpy(old + old_size, data, len);
+    return fs_write_as(name, old, old_size + len, 0, 0600);
 }

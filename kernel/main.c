@@ -26,7 +26,7 @@ void kmain(u32 magic, u32 mbi_addr) {
     serial_init();
     console_init();
     console_write("nxtsOS kernel starting\n");
-    console_write("nxtsOS v0.3.1 - original kernel, Multiboot boot\n");
+    console_write("nxtsOS v0.4.0 - original kernel, Multiboot boot\n");
     if (magic != 0x2BADB002) panic("bad Multiboot magic");
     struct multiboot_info *mbi = (struct multiboot_info *)mbi_addr;
     console_printf("Multiboot: mem_lower=%uK mem_upper=%uK mmap_len=%u\n",

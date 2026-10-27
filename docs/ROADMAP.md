@@ -90,28 +90,28 @@ with test + security reports exists in `releases/`.
   working shell — never a panic, hang, out-of-bounds read/write, or
   memory corruption. Fix, retest, record in `SECURITY_REPORT.md`.
 
-## Phase 5 — Loader, security and sessions (v0.4.0)
+## Phase 5 — Loader, security and sessions (v0.4.0) — DONE
 
-- [ ] **Task 5.1 — ELF loader from disk**
+- [x] **Task 5.1 — ELF loader from disk**
   Details: parse ELF32 headers from a file (validate magic, class,
   machine, entry, program-header bounds, section sizes against file
   size), load PT_LOAD segments into a fresh process address space,
   zero BSS, set entry/stack, run as ring-3. Reject malformed ELFs
   without crashing the kernel.
-- [ ] **Task 5.2 — Users, permissions and process ownership**
+- [x] **Task 5.2 — Users, permissions and process ownership**
   Details: UID/GID, per-process owner, file owner/mode enforcement on
   every VFS operation (owner/other read/write bits, root UID 0 only),
   syscall permission checks (a user process may not read/write files
   it has no right to, may not kill or inspect another user's process),
   kernel-vs-user argument validation on every syscall (already started
   for print; extend to all syscalls).
-- [ ] **Task 5.3 — Login and session management**
+- [x] **Task 5.3 — Login and session management**
   Details: text login (username, password verified against a stored
   hash — never plaintext — on disk), session per login (owned processes,
   working directory, environment), logout (kills the session's processes,
   frees their frames), session timeout/lock, audit log of logins and
   failed attempts (append-only, on disk).
-- [ ] **Task 5.4 — Adversarial security test (loader/security/sessions)**
+- [x] **Task 5.4 — Adversarial security test (loader/security/sessions)**
   Attacker view: a malicious ELF, a malicious user, a stolen session.
   Cases: malformed/truncated/oversized ELF, entry outside loaded
   segments, segments overlapping kernel region, BSS overflow, user
@@ -234,4 +234,4 @@ with test + security reports exists in `releases/`.
   running before the shell are not mistaken for a stuck run. Verified
   at 32 MB (the reported configuration) and 128 MB.
 
-Current release: **v0.3.1 = end of Phase 4 + bugfix**. Next: **Phase 5, Task 5.1 (ELF loader)**.
+Current release: **v0.4.0 = end of Phase 5**. Next: **Phase 6, Task 6.1 (package format)**.

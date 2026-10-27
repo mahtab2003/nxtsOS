@@ -35,10 +35,13 @@ def main():
     entries = []
     nxt = data_start
     for spec in a.add:
-        try:
-            name, path = spec.split(":", 1)
-        except ValueError:
-            sys.exit(f"bad --add {spec!r}, expected NAME:PATH")
+        # NAME:PATH[:MODE[:UID]] — MODE is octal (e.g. 600), UID decimal.
+        parts = spec.split(":")
+        if len(parts) < 2 or len(parts) > 4:
+            sys.exit(f"bad --add {spec!r}, expected NAME:PATH[:MODE[:UID]]")
+        name, path = parts[0], parts[1]
+        mode = int(parts[2], 8) if len(parts) >= 3 else 0o644
+        uid = int(parts[3]) if len(parts) == 4 else 0
         if not name or len(name) > 31 or "/" in name:
             sys.exit(f"bad file name {name!r}")
         if any(e[0] == name for e in entries):
@@ -50,12 +53,12 @@ def main():
         for s in range(nxt, nxt + need):
             disk[SECTOR + s // 8] |= (1 << (s % 8))
         disk[nxt * SECTOR:(nxt + need) * SECTOR] = data.ljust(need * SECTOR, b"\0")
-        entries.append((name, len(data), nxt, need))
+        entries.append((name, len(data), nxt, need, uid, mode))
         nxt += need
-    for i, (name, size, start, count) in enumerate(entries):
+    for i, (name, size, start, count, uid, mode) in enumerate(entries):
         off = dir_sector * SECTOR + i * 64
         disk[off:off + 32] = name.encode()[:31].ljust(32, b"\0")
-        disk[off + 32:off + 56] = struct.pack("<6I", size, start, count, 0, 0o644, 1)
+        disk[off + 32:off + 56] = struct.pack("<6I", size, start, count, uid, mode, 1)
     with open(a.output, "wb") as f:
         f.write(disk)
     print(f"Created {a.output}: {a.size_mb} MiB, {total} sectors, "
