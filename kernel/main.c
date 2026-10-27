@@ -26,7 +26,7 @@ void kmain(u32 magic, u32 mbi_addr) {
     serial_init();
     console_init();
     console_write("nxtsOS kernel starting\n");
-    console_write("nxtsOS v0.3.0 - original kernel, Multiboot boot\n");
+    console_write("nxtsOS v0.3.1 - original kernel, Multiboot boot\n");
     if (magic != 0x2BADB002) panic("bad Multiboot magic");
     struct multiboot_info *mbi = (struct multiboot_info *)mbi_addr;
     console_printf("Multiboot: mem_lower=%uK mem_upper=%uK mmap_len=%u\n",
@@ -54,8 +54,11 @@ void kmain(u32 magic, u32 mbi_addr) {
     } else {
         console_write("Filesystem: disk has no valid nxtsFS (not formatted by kernel)\n");
     }
+    console_write("Starting built-in test programs (2 processes)...\n");
+    console_write("The nxts> shell prompt will appear when they finish; keys typed now are buffered.\n");
     proc_init();
     scheduler_run();
+    console_write("Test programs finished. Starting shell...\n");
     shell_run();
     panic("shell returned");
 }

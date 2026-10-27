@@ -228,4 +228,10 @@ with test + security reports exists in `releases/`.
   Details: source + dist archives, SHA-256, VM guide, known issues,
   remote publishing only with explicit authorisation (private first).
 
-Current release: **v0.3.0 = end of Phase 4**. Next: **Phase 5, Task 5.1 (ELF loader)**.
+- [x] **v0.3.1 — Bugfix on Phase 4 (user-reported):** GRUB menu now
+  generated from `VERSION` at build time (v0.3.0's menu still said
+  v0.2.0); kernel prints boot-progress messages so the test programs
+  running before the shell are not mistaken for a stuck run. Verified
+  at 32 MB (the reported configuration) and 128 MB.
+
+Current release: **v0.3.1 = end of Phase 4 + bugfix**. Next: **Phase 5, Task 5.1 (ELF loader)**.

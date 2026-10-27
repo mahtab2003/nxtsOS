@@ -44,7 +44,11 @@ if command -v grub-file >/dev/null 2>&1; then
 fi
 echo "--- ISO ---"
 cp build/nxtsOS.bin build/iso/boot/nxtsOS.bin
-cp config/vm/grub.cfg build/iso/boot/grub/grub.cfg
+# Generate the GRUB menu from VERSION so the bootloader version can
+# never go stale (v0.3.0's menu still said v0.2.0).
+VER="$(cat VERSION)"
+sed "s/@VERSION@/v$VER/g" config/vm/grub.cfg > build/iso/boot/grub/grub.cfg
+grep "menuentry" build/iso/boot/grub/grub.cfg
 grub-mkrescue -o build/nxtsOS.iso build/iso
 ls -l build/nxtsOS.iso
 echo "BUILD OK"
