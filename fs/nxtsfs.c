@@ -69,7 +69,7 @@ static int is_system_file(const char *name) {
        like users.txt/audit.log it must never be created or written by
        a non-root user, or the brute-force lockout could be cleared. */
     return strcmp(name, "users.txt") == 0 || strcmp(name, "audit.log") == 0
-        || strcmp(name, "fails.txt") == 0;
+        || strcmp(name, "fails.txt") == 0 || strcmp(name, "packages.txt") == 0;
 }
 static int can_read_entry(struct dir_entry *e, u32 uid) {
     if (uid == 0) return 1;
@@ -88,6 +88,10 @@ static int find_entry(const char *name) {
         if (strcmp(dir[i].name, name) == 0) return i;
     }
     return -1;
+}
+int fs_exists(const char *name) {
+    if (!mounted || !valid_name(name)) return 0;
+    return find_entry(name) >= 0 ? 1 : 0;
 }
 static int save_bitmap(void) {
     for (u32 i = 0; i < sb.bitmap_sectors; i++) {

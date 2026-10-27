@@ -121,26 +121,26 @@ with test + security reports exists in `releases/`.
   logout, audit-log tampering. Expected: all rejected cleanly, no
   privilege escalation, no kernel fault. Fix, retest, record.
 
-## Phase 6 — Package management (v0.5.0)
+## Phase 6 — Package management (v0.5.0) — DONE
 
-- [ ] **Task 6.1 — Package format and manifest**
+- [x] **Task 6.1 — Package format and manifest**
   Details: package = manifest (name, version, dependencies with version
   ranges, files with SHA-256, entry program, required permissions) +
   files. Manifest is parsed with strict bounds; a malformed manifest
   is rejected whole, never partially installed.
-- [ ] **Task 6.2 — Installer, dependency resolution, removal**
+- [x] **Task 6.2 — Installer, dependency resolution, removal**
   Details: install (verify every file hash, resolve dependencies in
   order, refuse on missing/conflicting dependency, atomic-ish install:
   a failed install leaves no half-installed package), list, remove
   (refuse if another package depends on it, unless forced with a
   warning), upgrade (old version removed only after new verifies).
-- [ ] **Task 6.3 — Verification and trust**
+- [x] **Task 6.3 — Verification and trust**
   Details: SHA-256 verification of every file on install and on load
   (a tampered installed file refuses to run); package signing design
   (key handling, signature check) — full signature enforcement lands
   here if a workable key-distribution story exists, otherwise it is
   documented as a known gap, not claimed.
-- [ ] **Task 6.4 — Adversarial security test (packages)**
+- [x] **Task 6.4 — Adversarial security test (packages)**
   Attacker view: a malicious package. Cases: hash mismatch, manifest
   lying about file sizes, path traversal (`../`, absolute paths) in
   file entries, dependency cycles, dependency on a package that does
@@ -244,4 +244,19 @@ with test + security reports exists in `releases/`.
 - NOT in v0.4.1: disk encryption (needs a full AES + key-management
   phase; a fake XOR was deliberately not added).
 
-Current release: **v0.4.1 = end of Phase 5 + limits fix**. Next: **Phase 6, Task 6.1 (package format)** — or disk encryption as a dedicated phase, if the user chooses it.
+## v0.5.0 — Phase 6 (2026-10-26) — DONE
+- NXPKG format, strict manifest parsing, SHA-256 (kernel, verified
+  against the "abc" vector and Python hashlib), installer with
+  dependency version operators, duplicate/upgrade handling,
+  removal protection (+force with warning), load-time tamper check,
+  root-only install/remove, root-only registry. Host tool
+  tools/mkpkg.py. QEMU: package test, package security test (bad
+  hash, lying size, path traversal, absolute path, self-dep,
+  cycle, conflicting version, huge package, tamper after install),
+  root-only check, Phase 5 regression, security 3/3 — all PASS.
+- NOT in v0.5.0: package signing (known gap, see SECURITY.md),
+  disk encryption (next, as a dedicated phase per the user's
+  approved order: Phase 6 first, then encryption, then graphics).
+
+Current release: **v0.5.0 = end of Phase 6**. Next: **disk encryption
+as a dedicated phase**, then Phase 7 graphics.
