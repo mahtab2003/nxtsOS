@@ -149,7 +149,27 @@ with test + security reports exists in `releases/`.
   file refused to run, filesystem outside the package root never
   touched. Fix, retest, record.
 
-## Phase 7 — Graphics and input (v0.6.0)
+## Disk encryption — dedicated phase (v0.6.0) — DONE
+
+- [x] **AES-256-CTR sector encryption, transparent to the FS.**
+  Physical header sector ("NXTSENC1", version, iterations, salt,
+  key-check), logical sector L at physical L+1, CTR counter
+  L*32+block (matching OpenSSL aes-256-ctr IV 0). Unencrypted disks
+  boot unchanged, no prompt.
+- [x] **Boot passphrase + key derivation.** 10000-round SHA-256
+  (salt + passphrase, then hash + salt), key-check via AES-ECB of a
+  known plaintext, 3 attempts then halt. Host tool
+  tools/mkdisk_enc.py (needs openssl). Shell `aes-test` proves the
+  AES implementation against the FIPS 197 vector.
+- [x] **Adversarial security test (encryption).** Raw-disk string
+  hiding, superblock tamper (mount fails cleanly), header tamper
+  (every passphrase fails, halt), package tamper on an encrypted
+  disk (run refused by package hash). No exploitable findings.
+- [x] **Known limits documented, not hidden.** No passphrase change,
+  no recovery, no authenticated encryption, offline brute force
+  limited by the work factor only. See docs/ENCRYPTION.md.
+
+## Phase 7 — Graphics and input (v0.7.0)
 
 - [ ] **Task 7.1 — Framebuffer, fonts, mouse**
   Details: VESA/Bochs VBE mode request via Multiboot, framebuffer
@@ -167,7 +187,7 @@ with test + security reports exists in `releases/`.
   Expected: clipped or rejected, compositor survives, no memory
   corruption. Fix, retest, record.
 
-## Phase 8 — First desktop release (v0.7.0)
+## Phase 8 — First desktop release (v0.8.0)
 
 - [ ] **Task 8.1 — Desktop shell**
   Details: desktop with icons, taskbar, Start-style launcher, system
@@ -182,7 +202,7 @@ with test + security reports exists in `releases/`.
   that a non-admin user must not change, launcher entries pointing at
   tampered programs. Fix, retest, record.
 
-## Phase 9 — Networking (v0.8.0)
+## Phase 9 — Networking (v0.9.0)
 
 - [ ] **Task 9.1 — Network stack**
   Details: virtual Ethernet (e1000/virtio-net as QEMU provides), DHCP,
@@ -200,7 +220,7 @@ with test + security reports exists in `releases/`.
   dropped cleanly, TLS refused, no kernel fault, no privilege gain.
   Fix, retest, record.
 
-## Phase 10 — Modern desktop and applications (v0.9.0)
+## Phase 10 — Modern desktop and applications (v0.10.0)
 
 - [ ] **Task 10.1 — Desktop polish**
   Details: light/dark modes, wallpapers, accent colours, icon themes,
@@ -258,5 +278,16 @@ with test + security reports exists in `releases/`.
   disk encryption (next, as a dedicated phase per the user's
   approved order: Phase 6 first, then encryption, then graphics).
 
-Current release: **v0.5.0 = end of Phase 6**. Next: **disk encryption
-as a dedicated phase**, then Phase 7 graphics.
+## v0.6.0 — Disk encryption (2026-10-26) — DONE
+- AES-256-CTR sector encryption (docs/ENCRYPTION.md), boot passphrase,
+  10000-round key derivation, key-check, 3-attempt halt, host
+  tools/mkdisk_enc.py, shell aes-test (FIPS vector PASS). QEMU:
+  encryption test (correct/wrong passphrase, login, permissions,
+  package install on an encrypted disk), encryption security test
+  (raw hiding, superblock/header/package tamper), plus package,
+  Phase 5, security 3/3, v0.4.1, base, 32 MB storage regressions —
+  all PASS. NOT in v0.6.0: passphrase change, recovery, authenticated
+  encryption, package signing. Next: Phase 7 graphics.
+
+Current release: **v0.6.0 = end of disk encryption**. Next: **Phase 7
+graphics**.

@@ -5,6 +5,7 @@
 #include "proc.h"
 #include "pkg.h"
 #include "sha256.h"
+#include "aes.h"
 #include "../mm/pmm.h"
 #include "../drivers/pit.h"
 #include "../drivers/keyboard.h"
@@ -241,7 +242,7 @@ static int execute(char *line) {
     int n = tokenize(line, tok, &rest);
     if (n == 0) return 0;
     if (strcmp(tok[0], "help") == 0) {
-        console_write("Commands: help, mem, ticks, clear, reboot, fs, ls, cat <file>, write <file> <text>, rm <file>, run <file>, runbg <file>, jobs, kill <pid>, lock, unlock <user>, whoami, logout, pkg list, pkg install <file>, pkg remove <name>, pkg remove <name> force, sha256 <file>\n");
+        console_write("Commands: help, mem, ticks, clear, reboot, fs, ls, cat <file>, write <file> <text>, rm <file>, run <file>, runbg <file>, jobs, kill <pid>, lock, unlock <user>, whoami, logout, pkg list, pkg install <file>, pkg remove <name>, pkg remove <name> force, sha256 <file>, aes-test\n");
     } else if (strcmp(tok[0], "mem") == 0) {
         cmd_mem();
     } else if (strcmp(tok[0], "ticks") == 0) {
@@ -341,6 +342,27 @@ static int execute(char *line) {
         } else {
             console_write("Usage: pkg list | pkg install <file> | pkg remove <name> [force]\n");
         }
+    } else if (strcmp(tok[0], "aes-test") == 0) {
+        /* FIPS 197 AES-256 vector, using a local round-key array so
+           the boot disk key (if any) is never overwritten. */
+        u8 key[32], plain[16], cipher[16], expected[16];
+        for (int i = 0; i < 32; i++) key[i] = (u8)i;
+        for (int i = 0; i < 16; i++) plain[i] = (u8)(i * 16 + i);
+        /* plain is 00 11 22 ... ff, built above as i*16+i = i*17. */
+        u8 exp_bytes[16] = {0x8e, 0xa2, 0xb7, 0xca, 0x51, 0x67, 0x45, 0xbf,
+                            0xea, 0xfc, 0x49, 0x90, 0x4b, 0x49, 0x60, 0x89};
+        for (int i = 0; i < 16; i++) expected[i] = exp_bytes[i];
+        u32 rk[60];
+        aes256_expand(key, rk);
+        aes256_encrypt(rk, plain, cipher);
+        char hex[33];
+        for (int i = 0; i < 16; i++) {
+            const char *d = "0123456789abcdef";
+            hex[i*2] = d[(cipher[i] >> 4) & 0xF]; hex[i*2+1] = d[cipher[i] & 0xF];
+        }
+        hex[32] = 0;
+        console_printf("AES-256 test: %s\n", hex);
+        console_write(memcmp(cipher, expected, 16) == 0 ? "AES test PASS\n" : "AES test FAIL\n");
     } else if (strcmp(tok[0], "sha256") == 0) {
         if (n < 2) { console_write("Usage: sha256 <file>\n"); return 0; }
         /* Files up to 64 KiB, as with ELF loading. */
