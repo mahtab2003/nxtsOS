@@ -1,0 +1,10 @@
+build/
+*.o
+*.bin
+*.iso
+*.img
+*.log
+*.tar.gz
+*.zip
+__pycache__/
+.DS_Store
