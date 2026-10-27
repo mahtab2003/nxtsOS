@@ -10,6 +10,12 @@
 
 static ip_t our_ip, netmask_ip, gateway_ip, dns_ip;
 static int configured = 0;
+/* Set by net_http_get/net_https_get when the body was longer than
+   the buffer (stored prefix kept, rest drained). Read it right
+   after the get call; the next get call resets it. */
+static int fetch_truncated = 0;
+int net_fetch_truncated(void) { return fetch_truncated; }
+void net_set_fetch_truncated(int v) { fetch_truncated = v; }
 static u16 ip_id_counter = 0;
 static u32 stack_drops = 0;
 
@@ -553,9 +559,14 @@ int net_http_get(const char *host, u16 port, const char *path, char *buf, u32 ma
     p = "\r\n\r\n"; while (*p) req[ri++] = *p++;
     req[ri] = 0;
     if (net_tcp_send((const u8 *)req, (u32)ri) != 0) { net_tcp_close(); return -1; }
-    /* Read until close or content-length satisfied. */
+    /* Read until close or content-length satisfied. v0.10.0: a
+       body larger than the buffer is TRUNCATED, not failed: the
+       buffer fills, the rest is drained (so the completion check
+       still works), and net_fetch_truncated() reports it. */
+    fetch_truncated = 0;
     u8 tmp[1024];
-    u32 total = 0, header_end = 0, content_len = 0xFFFFFFFFu;
+    u32 total = 0, seen = 0, header_end = 0, content_len = 0xFFFFFFFFu;
+    int storing = 1;
     u32 start = timer_ticks;
     while (timer_ticks - start < 1000) {
         int n = net_tcp_recv(tmp, sizeof(tmp), 100);
@@ -565,15 +576,23 @@ int net_http_get(const char *host, u16 port, const char *path, char *buf, u32 ma
                the overall deadline, unless we already have a
                complete body. */
             if (header_end && content_len != 0xFFFFFFFFu &&
-                total >= header_end + content_len) break;
+                seen >= header_end + content_len) break;
             continue;
         }
+        seen += (u32)n;
         /* Append to buf (body extraction happens at the end
            from the raw stream kept in buf itself). */
-        if (total + (u32)n > max - 1) { net_tcp_close(); return -1; }
-        memcpy(buf + total, tmp, (u32)n);
-        total += (u32)n;
-        buf[total] = 0;
+        if (storing) {
+            if (total + (u32)n > max - 1) {
+                u32 room = max - 1 - total;
+                if (room) { memcpy(buf + total, tmp, room); total += room; buf[total] = 0; }
+                storing = 0; fetch_truncated = 1;
+            } else {
+                memcpy(buf + total, tmp, (u32)n);
+                total += (u32)n;
+                buf[total] = 0;
+            }
+        }
         if (!header_end) {
             for (u32 i = 0; i + 3 < total; i++) {
                 if (buf[i] == '\r' && buf[i+1] == '\n' && buf[i+2] == '\r' && buf[i+3] == '\n') {
@@ -608,7 +627,7 @@ int net_http_get(const char *host, u16 port, const char *path, char *buf, u32 ma
                 }
             }
         }
-        if (header_end && content_len != 0xFFFFFFFFu && total >= header_end + content_len) break;
+        if (header_end && content_len != 0xFFFFFFFFu && seen >= header_end + content_len) break;
     }
     net_tcp_close();
     if (!header_end) return -1;

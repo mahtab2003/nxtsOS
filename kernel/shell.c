@@ -267,7 +267,7 @@ static int execute(char *line) {
     int n = tokenize(line, tok, &rest);
     if (n == 0) return 0;
     if (strcmp(tok[0], "help") == 0) {
-        console_write("Commands: help, mem, ticks, clear, reboot, fs, ls, cat <file>, write <file> <text>, rm <file>, run <file>, runbg <file>, jobs, kill <pid>, lock, unlock <user>, whoami, logout, idle [minutes|off], fbinfo, kbdstat, pkg list, pkg install <file>, pkg remove <name>, pkg remove <name> force, sha256 <file>, aes-test, gui, guitest, cursortest, cliptest, desktop, desktopautotest, desktopsectest, mouse, netinfo, dhcp, ping <ip>, dns <name>, http <host> <path>, https <host> <path>, nettest\n");
+        console_write("Commands: help, mem, ticks, clear, reboot, fs, ls, cat <file>, write <file> <text>, rm <file>, run <file>, runbg <file>, jobs, kill <pid>, lock, unlock <user>, whoami, logout, idle [minutes|off], fbinfo, kbdstat, pkg list, pkg install <file>, pkg remove <name>, pkg remove <name> force, sha256 <file>, aes-test, gui, guitest, cursortest, cliptest, desktop, desktopautotest, desktopsectest, desktop10test, desktopappstest, desktop10sec, desktopwebtest, desktopnonic, mouse, netinfo, dhcp, ping <ip>, dns <name>, http <host> <path>, https <host> <path>, nettest\n");
     } else if (strcmp(tok[0], "idle") == 0) {
         if (n < 2) {
             if (idle_timeout_minutes == 0) console_write("Idle timeout: disabled (never locks on idle)\n");
@@ -423,6 +423,16 @@ static int execute(char *line) {
         wm_desktop_sectest();
     } else if (strcmp(tok[0], "desktopcalctest") == 0) {
         wm_desktop_calctest();
+    } else if (strcmp(tok[0], "desktop10test") == 0) {
+        wm_desktop_p10test();
+    } else if (strcmp(tok[0], "desktopappstest") == 0) {
+        wm_desktop_appstest();
+    } else if (strcmp(tok[0], "desktop10sec") == 0) {
+        wm_desktop_p10sec();
+    } else if (strcmp(tok[0], "desktopwebtest") == 0) {
+        wm_desktop_webtest();
+    } else if (strcmp(tok[0], "desktopnonic") == 0) {
+        wm_desktop_nonictest();
     } else if (strcmp(tok[0], "netinfo") == 0) {
         if (!net_present()) { console_write("net: no NIC\n"); return 0; }
         mac_t m; net_mac(&m);
@@ -481,7 +491,7 @@ static int execute(char *line) {
         static char body[8192];
         int bl = net_http_get(tok[1], port, path, body, sizeof(body));
         if (bl < 0) console_write("http: failed\n");
-        else console_printf("http: %d bytes\n%s\n", bl, body);
+        else console_printf("http: %d bytes%s\n%s\n", bl, net_fetch_truncated() ? " (truncated)" : "", body);
     } else if (strcmp(tok[0], "https") == 0) {
         if (n < 2 || !rest || !rest[0]) { console_write("Usage: https <host> <path> [port]\n"); return 0; }
         char *path = rest;
@@ -504,7 +514,7 @@ static int execute(char *line) {
         int bl = net_https_get(tok[1], port, path, body, sizeof(body));
         if (bl == -2) console_write("https: certificate refused, connection not made\n");
         else if (bl < 0) console_write("https: failed\n");
-        else console_printf("https: %d bytes\n%s\n", bl, body);
+        else console_printf("https: %d bytes%s\n%s\n", bl, net_fetch_truncated() ? " (truncated)" : "", body);
     } else if (strcmp(tok[0], "nettest") == 0) {
         console_write(net_test_run() == 0 ? "nettest PASS\n" : "nettest FAIL\n");
     } else if (strcmp(tok[0], "mousepoll") == 0) {

@@ -267,20 +267,34 @@ with test + security reports exists in `releases/`.
   no user-mode socket API exists in v0.9.0; it must be tested when
   the API lands.
 
-## Phase 10 — Modern desktop and applications (v0.10.0)
+## Phase 10 — Modern desktop and applications (v0.10.0) — DONE
 
-- [ ] **Task 10.1 — Desktop polish**
-  Details: light/dark modes, wallpapers, accent colours, icon themes,
-  typography, workspaces, window snapping/tiling, low-resource mode,
-  accessibility options, configurable shortcuts — each persistent on disk.
-- [ ] **Task 10.2 — Native application ecosystem**
-  Details: file manager, terminal, text editor, calculator, system
-  monitor, image viewer, network manager, lightweight web browser
-  (honest scope: no claim of a full modern browser engine).
-- [ ] **Task 10.3 — Adversarial security test (applications)**
-  Attacker view: as before, plus application-level abuse (a text file
-  that is not text, a huge image, a calculator input that overflows).
-  Fix, retest, record.
+- [x] **Task 10.1 — Desktop polish**
+  Delivered: Classic/Dark/Light/High-contrast themes, accent
+  colours, solid/gradient/dots wallpapers, low-resource mode,
+  large text, shortcut presets, 2 workspaces, snap
+  halves/maximise-restore — all persistent in settings.txt
+  with invalid values ignored. NOT delivered: separate icon
+  themes (one built-in icon set) and tiling layouts beyond
+  snap halves; typography is the built-in 8x16 font plus
+  2x large-text labels.
+- [x] **Task 10.2 — Native application ecosystem**
+  Delivered: Files Open integration, Editor, Monitor,
+  Network manager, text-only Web browser, BMP Viewer,
+  Console package (term.nxpkg), Calculator unchanged.
+  Honest scope kept: Web is text-only (no HTML rendering,
+  no engine claim), Console cannot run programs.
+- [x] **Task 10.3 — Adversarial security test (applications)**
+  Delivered: garbage settings rejected at load, non-text
+  editor files sanitised, oversize/truncated BMP refused
+  before pixel reads, huge web page truncated with a
+  marker, no-NIC Network window reports cleanly. One
+  real bug found and fixed: HTTP/HTTPS clients failed
+  on oversize bodies instead of truncating (see
+  releases/v0.10.0/SECURITY_REPORT.md). Calculator
+  overflow input was not separately fuzzed beyond the
+  existing '7'-key verification; the calculator clamps
+  values to ±9999 by design.
 
 ## Phase 11 — Hardening, update and verified releases (v1.0.0)
 
@@ -441,5 +455,6 @@ with test + security reports exists in `releases/`.
   device in sandbox); improvement is argued from pixel
   counts, not a phone fps number.
 
-Current release: **v0.9.0 = Phase 9 networking**. Next: **Phase 10
-modern desktop and applications**.
+Current release: **v0.10.0 = Phase 10 modern desktop and
+applications**. Next: **Phase 11 hardening, update and verified
+releases (v1.0.0)**.

@@ -1,5 +1,6 @@
 #include "wm.h"
 #include "fb.h"
+#include "font_data.h"
 #include "console.h"
 #include "../drivers/mouse.h"
 #include "../drivers/keyboard.h"
@@ -9,13 +10,15 @@
 #include "users.h"
 #include "../fs/vfs.h"
 #include "proc.h"
+#include "../net/net.h"
 
 #define MAX_WINDOWS 8
 #define TITLE_H 20
 #define TASKBAR_H 24
 
 enum win_type { W_WELCOME, W_SYSTEM, W_MOUSE, W_BUTTONS, W_USER,
-    W_SETTINGS, W_FILES, W_ABOUT, W_DESKTOP_ICONS };
+    W_SETTINGS, W_FILES, W_ABOUT, W_DESKTOP_ICONS,
+    W_NETWORK, W_WEB, W_EDITOR, W_MONITOR, W_VIEWER };
 
 /* GUI event queue for user windows (Phase 8). Event types:
    1=expose (redraw), 2=mouse down, 3=mouse up, 4=key, 5=close.
@@ -45,6 +48,9 @@ struct window {
     int search_len;
     int selected; /* W_FILES only: selected file index, -1 = none */
     char preview[256]; /* W_FILES only: preview text */
+    int ws; /* Phase 10: workspace this window belongs to (0/1) */
+    int snapped; /* Phase 10: 1 if placed by snap (old_* holds restore geometry) */
+    int aux1, aux2; /* Phase 10: per-window scratch (web scroll, editor cursor/scroll) */
 };
 
 static struct window wins[MAX_WINDOWS];
@@ -52,8 +58,19 @@ static int zorder[MAX_WINDOWS]; /* window indices, back to front */
 static int zcount = 0;
 static int next_id = 1;
 
+/* Phase 10: current workspace. Declared here (not in the desktop
+   section below) because wm_create assigns it to every window. */
+static int desk_ws = 0;
 static s32 scr_w(void) { return fb_ready() ? (s32)fb_width() : 800; }
 static s32 scr_h(void) { return fb_ready() ? (s32)fb_height() : 600; }
+/* Phase 10 theme helpers, defined with the desktop section below
+   (forward-declared here because draw_window_clip uses the accent). */
+static u32 desk_accent_col(void);
+static u32 desk_bg_col(void);
+static u32 desk_taskbar_col(void);
+static u32 desk_panel_col(void);
+static u32 desk_panel_text_col(void);
+static u32 desk_taskbar_text_col(void);
 
 int wm_count(void) {
     int n = 0;
@@ -93,6 +110,7 @@ static int wm_create(const char *title, s32 x, s32 y, s32 w, s32 h, int type) {
     struct window *wn = &wins[idx];
     memset(wn, 0, sizeof(*wn));
     wn->used = 1; wn->id = next_id++; wn->type = type;
+    wn->ws = desk_ws;
     wn->x = x; wn->y = y; wn->w = w; wn->h = h;
     wn->old_x = x; wn->old_y = y; wn->old_w = w; wn->old_h = h;
     int ti = 0;
@@ -142,7 +160,10 @@ static void draw_window_clip(int idx, s32 dx, s32 dy, s32 dw, s32 dh) {
     struct window *wn = &wins[idx];
     if (wn->minimized) return;
     s32 x = wn->x, y = wn->y, w = wn->w, h = wn->h;
-    u32 tcol = wn->focused ? 0x002060A0u : 0x00606060u;
+    /* Phase 10: focused title bars use the accent colour. The
+       Classic accent is the old blue, so Phase 7/8 pixel counts
+       are unchanged under the default theme. */
+    u32 tcol = wn->focused ? desk_accent_col() : 0x00606060u;
     fb_fill_rect_clip(x, y, w, TITLE_H, tcol, dx, dy, dw, dh);
     fb_fill_rect_clip(x, y + TITLE_H, w, 1, 0x00000000u, dx, dy, dw, dh);
     fb_fill_rect_clip(x, y, 1, h, 0x00000000u, dx, dy, dw, dh);
@@ -785,6 +806,54 @@ int wm_test(void) {
 #define DESK_TASKBAR 0x00404040u
 static int desk_icons_on = 1;
 static int desk_clock_24 = 1;
+/* Phase 10 appearance settings, persisted in settings.txt
+   (theme/accent/wallpaper/lowres/bigtext/shortcuts). Defaults
+   reproduce the v0.8.0/v0.9.0 look exactly, so every older
+   pixel count stays valid under the default theme. */
+static int desk_theme = 0; /* 0 Classic, 1 Dark, 2 Light, 3 High-contrast */
+static int desk_accent = 0; /* 0 Blue, 1 Gold, 2 Green, 3 Red */
+static int desk_wallpaper = 0; /* 0 Solid, 1 Gradient, 2 Dots */
+static int desk_lowres = 0;
+static int desk_bigtext = 0;
+static int desk_shortcut_preset = 0; /* 0 L/W, 1 K/J, 2 X/Z */
+static const char *desk_theme_name(void) {
+    return desk_theme == 1 ? "Dark" : (desk_theme == 2 ? "Light" :
+        (desk_theme == 3 ? "HiCon" : "Classic"));
+}
+static const char *desk_accent_name(void) {
+    return desk_accent == 1 ? "Gold" : (desk_accent == 2 ? "Green" :
+        (desk_accent == 3 ? "Red" : "Blue"));
+}
+static const char *desk_wallpaper_name(void) {
+    return desk_wallpaper == 1 ? "Gradient" : (desk_wallpaper == 2 ? "Dots" : "Solid");
+}
+static u32 desk_accent_col(void) {
+    return desk_accent == 1 ? 0x00B8860Bu : (desk_accent == 2 ? 0x00208040u :
+        (desk_accent == 3 ? 0x00A02020u : 0x002060A0u));
+}
+static u32 desk_bg_col(void) {
+    return desk_theme == 1 ? 0x00101010u : (desk_theme == 2 ? 0x00E8E8E8u :
+        (desk_theme == 3 ? 0x00000000u : DESK_BG));
+}
+static u32 desk_taskbar_col(void) {
+    return desk_theme == 1 ? 0x00202020u : (desk_theme == 2 ? 0x00D0D0D0u :
+        (desk_theme == 3 ? 0x00000000u : DESK_TASKBAR));
+}
+static u32 desk_panel_col(void) {
+    return desk_theme == 1 ? 0x00303030u : (desk_theme == 2 ? 0x00E0E0E0u :
+        (desk_theme == 3 ? 0x00000000u : 0x00C0C0C0u));
+}
+static u32 desk_panel_text_col(void) {
+    return (desk_theme == 1 || desk_theme == 3) ? 0x00FFFFFFu : 0x00000000u;
+}
+static u32 desk_taskbar_text_col(void) {
+    return desk_theme == 2 ? 0x00000000u : 0x00FFFFFFu;
+}
+static int desk_throttle_ticks(void) { return desk_lowres ? 5 : 2; }
+/* Shortcut presets: {lock key, workspace key}, matched
+   case-insensitively (typing goes to a focused input first,
+   so these only fire when no text field has focus). */
+static const char desk_shortcut_keys[3][2] = {{'L','W'},{'K','J'},{'X','Z'}};
 static char desk_notif[8][64];
 static int desk_notif_count = 0;
 static int desk_launcher_open = 0;
@@ -928,11 +997,32 @@ static void desk_load_settings(void) {
         else if (strcmp(key, "mouse") == 0) mouse_set_scale((int)v);
         else if (strcmp(key, "clock") == 0) desk_clock_24 = v ? 1 : 0;
         else if (strcmp(key, "icons") == 0) desk_icons_on = v ? 1 : 0;
+        /* Phase 10 keys: out-of-range values are ignored (and
+           logged) rather than applied — a corrupt settings.txt
+           must never produce an invalid theme or a crash. */
+        else if (strcmp(key, "theme") == 0) {
+            if (v <= 3) desk_theme = (int)v;
+            else console_printf("settings: ignored invalid theme=%u\n", v);
+        }
+        else if (strcmp(key, "accent") == 0) {
+            if (v <= 3) desk_accent = (int)v;
+            else console_printf("settings: ignored invalid accent=%u\n", v);
+        }
+        else if (strcmp(key, "wallpaper") == 0) {
+            if (v <= 2) desk_wallpaper = (int)v;
+            else console_printf("settings: ignored invalid wallpaper=%u\n", v);
+        }
+        else if (strcmp(key, "lowres") == 0) desk_lowres = v ? 1 : 0;
+        else if (strcmp(key, "bigtext") == 0) desk_bigtext = v ? 1 : 0;
+        else if (strcmp(key, "shortcuts") == 0) {
+            if (v <= 2) desk_shortcut_preset = (int)v;
+            else console_printf("settings: ignored invalid shortcuts=%u\n", v);
+        }
     }
 }
 static int desk_save_settings(char *status_out) {
     if (!fs_mounted()) { const char *t = "No disk"; int i=0; while(t[i]){status_out[i]=t[i];i++;} status_out[i]=0; return -1; }
-    char data[128]; int n = 0;
+    char data[256]; int n = 0;
     const char *k1 = "idle="; while (*k1) data[n++] = *k1++;
     { char tmp[16]; u32_to_str(shell_idle_minutes(), tmp, 10); int i=0; while(tmp[i]) data[n++]=tmp[i++]; }
     data[n++] = '\n';
@@ -943,6 +1033,19 @@ static int desk_save_settings(char *status_out) {
     data[n++] = desk_clock_24 ? '1' : '0'; data[n++] = '\n';
     const char *k4 = "icons="; while (*k4) data[n++] = *k4++;
     data[n++] = desk_icons_on ? '1' : '0'; data[n++] = '\n';
+    /* Phase 10 keys, same format. */
+    const char *k5 = "theme="; while (*k5) data[n++] = *k5++;
+    data[n++] = (char)('0' + desk_theme); data[n++] = '\n';
+    const char *k6 = "accent="; while (*k6) data[n++] = *k6++;
+    data[n++] = (char)('0' + desk_accent); data[n++] = '\n';
+    const char *k7 = "wallpaper="; while (*k7) data[n++] = *k7++;
+    data[n++] = (char)('0' + desk_wallpaper); data[n++] = '\n';
+    const char *k8 = "lowres="; while (*k8) data[n++] = *k8++;
+    data[n++] = desk_lowres ? '1' : '0'; data[n++] = '\n';
+    const char *k9 = "bigtext="; while (*k9) data[n++] = *k9++;
+    data[n++] = desk_bigtext ? '1' : '0'; data[n++] = '\n';
+    const char *k10 = "shortcuts="; while (*k10) data[n++] = *k10++;
+    data[n++] = (char)('0' + desk_shortcut_preset); data[n++] = '\n';
     data[n] = 0;
     if (fs_write_as("settings.txt", (const u8 *)data, (u32)n, shell_session_uid(), 0600) != 0) {
         const char *t = "Save failed: permission denied"; int i=0; while(t[i]){status_out[i]=t[i];i++;} status_out[i]=0;
@@ -983,22 +1086,54 @@ static void desk_draw_settings_content(int idx, s32 dx, s32 dy, s32 dw, s32 dh) 
     draw_text2(x + 84, y + 32, wn->search, 0x00000000u, 0x00FFFFFFu, x + 80, y + 28, w - 100, 24, dx, dy, dw, dh);
     if (wn->field_focused) fb_fill_rect_clip(x + 84 + wn->search_len * 8, y + 32, 2, 16, 0x00000000u, dx, dy, dw, dh);
     /* Setting rows, filtered by search. Row layout: name at
-       x+10, value button at x+200 (width 100, height 24). */
-    const char *names[4] = {"Idle timeout", "Mouse speed", "Clock format", "Desktop icons"};
-    int row = 0;
-    for (int s = 0; s < 4; s++) {
-        if (!str_contains_ci(names[s], wn->search)) continue;
-        s32 ry = y + 64 + row * 32;
-        char val[32];
-        if (s == 0) idle_text(val);
-        else if (s == 1) mouse_text(val);
-        else if (s == 2) { val[0]='2'; val[1]='4'; val[2]='h'; val[3]=0; if (!desk_clock_24) { val[0]='1'; val[1]='2'; val[2]='h'; val[3]=0; } }
-        else { val[0]='O'; val[1]='n'; val[2]=0; if (!desk_icons_on) { val[0]='O'; val[1]='f'; val[2]='f'; val[3]=0; } }
-        draw_text2(x + 10, ry + 4, names[s], 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
-        fb_fill_rect_clip(x + 200, ry, 100, 24, 0x00C0C0C0u, dx, dy, dw, dh);
-        draw_text2(x + 208, ry + 4, val, 0x00000000u, 0x00C0C0C0u, cx, cy, cw, ch, dx, dy, dw, dh);
-        row++;
+       x+10, value button at x+200 (width 100, height 24).
+       Page 0 is the original four rows (positions unchanged,
+       so older tests still hit them); page 1 is the Phase 10
+       appearance page. The page toggle sits below the rows,
+       above Save, so neither moves. */
+    if (wn->aux1 == 0) {
+        const char *names[4] = {"Idle timeout", "Mouse speed", "Clock format", "Desktop icons"};
+        int row = 0;
+        for (int s = 0; s < 4; s++) {
+            if (!str_contains_ci(names[s], wn->search)) continue;
+            s32 ry = y + 64 + row * 32;
+            char val[32];
+            if (s == 0) idle_text(val);
+            else if (s == 1) mouse_text(val);
+            else if (s == 2) { val[0]='2'; val[1]='4'; val[2]='h'; val[3]=0; if (!desk_clock_24) { val[0]='1'; val[1]='2'; val[2]='h'; val[3]=0; } }
+            else { val[0]='O'; val[1]='n'; val[2]=0; if (!desk_icons_on) { val[0]='O'; val[1]='f'; val[2]='f'; val[3]=0; } }
+            draw_text2(x + 10, ry + 4, names[s], 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+            fb_fill_rect_clip(x + 200, ry, 100, 24, 0x00C0C0C0u, dx, dy, dw, dh);
+            draw_text2(x + 208, ry + 4, val, 0x00000000u, 0x00C0C0C0u, cx, cy, cw, ch, dx, dy, dw, dh);
+            row++;
+        }
+    } else {
+        const char *names[6] = {"Theme", "Accent colour", "Wallpaper", "Low-resource", "Large text", "Shortcuts"};
+        int row = 0;
+        for (int s = 0; s < 6; s++) {
+            if (!str_contains_ci(names[s], wn->search)) continue;
+            s32 ry = y + 64 + row * 32;
+            char val[32]; int vi = 0;
+            const char *t = 0;
+            if (s == 0) t = desk_theme_name();
+            else if (s == 1) t = desk_accent_name();
+            else if (s == 2) t = desk_wallpaper_name();
+            else if (s == 3) { val[0]='O'; val[1]='n'; val[2]=0; if (!desk_lowres) { val[0]='O'; val[1]='f'; val[2]='f'; val[3]=0; } }
+            else if (s == 4) { val[0]='O'; val[1]='n'; val[2]=0; if (!desk_bigtext) { val[0]='O'; val[1]='f'; val[2]='f'; val[3]=0; } }
+            else {
+                val[0] = desk_shortcut_keys[desk_shortcut_preset][0]; val[1] = '/';
+                val[2] = desk_shortcut_keys[desk_shortcut_preset][1]; val[3] = 0;
+            }
+            if (t) { while (t[vi]) { val[vi] = t[vi]; vi++; } val[vi] = 0; }
+            draw_text2(x + 10, ry + 4, names[s], 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+            fb_fill_rect_clip(x + 200, ry, 100, 24, 0x00C0C0C0u, dx, dy, dw, dh);
+            draw_text2(x + 208, ry + 4, val, 0x00000000u, 0x00C0C0C0u, cx, cy, cw, ch, dx, dy, dw, dh);
+            row++;
+        }
     }
+    /* Page toggle button (below the rows, above Save). */
+    fb_fill_rect_clip(x + 10, y + 252, 140, 24, 0x00C0C0C0u, dx, dy, dw, dh);
+    draw_text2(x + 18, y + 256, wn->aux1 == 0 ? "Appearance >" : "< General", 0x00000000u, 0x00C0C0C0u, cx, cy, cw, ch, dx, dy, dw, dh);
     /* Save button + status. */
     fb_fill_rect_clip(x + 10, y + wn->h - 44, 120, 24, 0x00C0C0C0u, dx, dy, dw, dh);
     draw_text2(x + 18, y + wn->h - 40, "Save settings", 0x00000000u, 0x00C0C0C0u, cx, cy, cw, ch, dx, dy, dw, dh);
@@ -1032,12 +1167,16 @@ static void desk_draw_files_content(int idx, s32 dx, s32 dy, s32 dw, s32 dh) {
     fb_fill_rect_clip(x + 10, py, w - 20, 60, 0x00FFFFFFu, dx, dy, dw, dh);
     if (wn->selected >= 0) draw_text2(x + 14, py + 4, wn->preview, 0x00000000u, 0x00FFFFFFu, x + 10, py, w - 20, 60, dx, dy, dw, dh);
     else draw_text2(x + 14, py + 4, "Click a file to preview it.", 0x00000000u, 0x00FFFFFFu, x + 10, py, w - 20, 60, dx, dy, dw, dh);
+    /* Phase 10: Open button — .txt opens in the Editor, .bmp in
+       the Viewer, anything else reports no viewer. */
+    fb_fill_rect_clip(x + 10, py + 68, 100, 24, 0x00C0C0C0u, dx, dy, dw, dh);
+    draw_text2(x + 18, py + 72, "Open", 0x00000000u, 0x00C0C0C0u, cx, cy, cw, ch, dx, dy, dw, dh);
 }
 static void desk_draw_about_content(int idx, s32 dx, s32 dy, s32 dw, s32 dh) {
     struct window *wn = &wins[idx];
     s32 x = wn->x, y = wn->y;
     s32 cx = x + 1, cy = y + TITLE_H + 1, cw = wn->w - 2, ch = wn->h - TITLE_H - 2;
-    draw_text2(x + 10, y + 32, "nxtsOS v0.9.0", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    draw_text2(x + 10, y + 32, "nxtsOS v0.10.0", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
     draw_text2(x + 10, y + 52, "Original kernel, Multiboot, 32-bit x86.", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
     draw_text2(x + 10, y + 72, "Not a Linux distribution or fork.", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
     char buf[64];
@@ -1048,30 +1187,472 @@ static void desk_draw_about_content(int idx, s32 dx, s32 dy, s32 dw, s32 dh) {
     draw_text2(x + 10, y + 132, "settings, lock screen, Calculator.", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
 }
 
+/* ================= Phase 10 applications (v0.10.0) =================
+   Built-in desktop windows (kernel-side, like Settings/Files):
+   Network, Web, Editor, Monitor, Viewer. They use the same
+   window struct as the older windows; per-app state lives in
+   static buffers because only one window of each type can be
+   open at once (open functions bring an existing one forward).
+   Editor cap: 8192 bytes (a static buffer; larger files are
+   refused, not truncated). Viewer cap: 24-bit uncompressed BMP,
+   at most 128x128 pixels, file at most 128 KiB. Web cap: the
+   8192-byte body buffer (a full buffer is reported as possibly
+   truncated, never silently cut). */
+static char desk_net_msg[128];
+static char desk_web_body[8192];
+static u32 desk_web_len = 0;
+static char desk_web_status[128];
+static char desk_ed_buf[8193];
+static u32 desk_ed_len = 0;
+static char desk_ed_name[32];
+static char desk_ed_msg[128];
+static u8 desk_bmp[131072];
+static u32 desk_bmp_size = 0;
+static int desk_bmp_w = 0, desk_bmp_h = 0, desk_bmp_ok = 0;
+static char desk_bmp_name[32];
+static char desk_bmp_msg[128];
+
+static void ip_text(ip_t ip, char *out) {
+    int n = 0;
+    for (int i = 0; i < 4; i++) {
+        char tmp[16]; u32_to_str(ip.b[i], tmp, 10);
+        int t = 0; while (tmp[t]) out[n++] = tmp[t++];
+        if (i < 3) out[n++] = '.';
+    }
+    out[n] = 0;
+}
+static void mac_text(mac_t m, char *out) {
+    const char *hex = "0123456789ABCDEF";
+    int n = 0;
+    for (int i = 0; i < 6; i++) {
+        out[n++] = hex[(m.b[i] >> 4) & 0xF]; out[n++] = hex[m.b[i] & 0xF];
+        if (i < 5) out[n++] = ':';
+    }
+    out[n] = 0;
+}
+static void set_msg(char *dst, const char *src) {
+    int i = 0; while (src[i] && i < 127) { dst[i] = src[i]; i++; } dst[i] = 0;
+}
+static void desk_draw_network_content(int idx, s32 dx, s32 dy, s32 dw, s32 dh) {
+    struct window *wn = &wins[idx];
+    s32 x = wn->x, y = wn->y;
+    s32 cx = x + 1, cy = y + TITLE_H + 1, cw = wn->w - 2, ch = wn->h - TITLE_H - 2;
+    char line[96];
+    draw_text2(x + 10, y + 32, "Network status", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    if (!net_present()) {
+        draw_text2(x + 10, y + 56, "No network device found.", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+        draw_text2(x + 10, y + 76, "Run QEMU with -device e1000,netdev=n0.", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    } else {
+        mac_t mac; net_mac(&mac); mac_text(mac, line);
+        draw_text2(x + 10, y + 56, "MAC:", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+        draw_text2(x + 70, y + 56, line, 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+        draw_text2(x + 10, y + 76, net_ip_configured() ? "Configured: yes (DHCP done)" : "Configured: no (run DHCP)", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+        if (net_ip_configured()) {
+            ip_t a; char t[32];
+            net_ip_addr(&a); ip_text(a, t);
+            draw_text2(x + 10, y + 96, "IP:", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+            draw_text2(x + 70, y + 96, t, 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+            net_ip_netmask(&a); ip_text(a, t);
+            draw_text2(x + 10, y + 116, "Mask:", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+            draw_text2(x + 70, y + 116, t, 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+            net_ip_gateway(&a); ip_text(a, t);
+            draw_text2(x + 10, y + 136, "Gateway:", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+            draw_text2(x + 90, y + 136, t, 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+            net_ip_dns(&a); ip_text(a, t);
+            draw_text2(x + 10, y + 156, "DNS:", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+            draw_text2(x + 70, y + 156, t, 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+        }
+        char num[16];
+        u32_to_str(net_rx_count(), num, 10);
+        draw_text2(x + 10, y + 180, "RX packets:", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+        draw_text2(x + 130, y + 180, num, 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+        u32_to_str(net_tx_count(), num, 10);
+        draw_text2(x + 10, y + 200, "TX packets:", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+        draw_text2(x + 130, y + 200, num, 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    }
+    fb_fill_rect_clip(x + 10, y + 230, 120, 24, 0x00C0C0C0u, dx, dy, dw, dh);
+    draw_text2(x + 18, y + 234, "Run DHCP", 0x00000000u, 0x00C0C0C0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    fb_fill_rect_clip(x + 150, y + 230, 140, 24, 0x00C0C0C0u, dx, dy, dw, dh);
+    draw_text2(x + 158, y + 234, "Ping gateway", 0x00000000u, 0x00C0C0C0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    draw_text2(x + 10, y + 264, desk_net_msg, 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+}
+static int desk_open_network(void) {
+    for (int i = 0; i < MAX_WINDOWS; i++)
+        if (wins[i].used && wins[i].type == W_NETWORK) { bring_to_front(i); return i; }
+    int id = wm_create("Network", 160, 80, 480, 320, W_NETWORK);
+    if (id < 0) return -1;
+    desk_net_msg[0] = 0;
+    console_write("Desktop: Network opened\n");
+    if (!net_present()) console_write("network: no device\n");
+    return find_by_id(id);
+}
+/* Web fetch: parse "host[:port][/path]" with optional http(s)://
+   prefix. Returns body length, or -1 failed, -2 cert refused. */
+static int desk_web_fetch(const char *addr) {
+    char host[64]; int hi = 0; int tls = 0; u16 port = 0; char path[64]; int pi = 0;
+    int i = 0;
+    if (addr[0]=='h' && addr[1]=='t' && addr[2]=='t' && addr[3]=='p') {
+        i = 4;
+        if (addr[i]=='s') { tls = 1; i++; }
+        if (addr[i]==':' && addr[i+1]=='/' && addr[i+2]=='/') i += 3;
+        else { i = 0; tls = 0; }
+    }
+    while (addr[i] && addr[i] != '/' && addr[i] != ':' && hi < 63) host[hi++] = addr[i++];
+    host[hi] = 0;
+    if (addr[i] == ':') {
+        i++; u32 p = 0;
+        while (addr[i] >= '0' && addr[i] <= '9') { p = p * 10 + (u32)(addr[i] - '0'); i++; }
+        if (p > 0 && p < 65536) port = (u16)p;
+    }
+    if (port == 0) port = tls ? 443 : 80;
+    if (addr[i] == '/') { while (addr[i] && pi < 63) path[pi++] = addr[i++]; }
+    else { path[pi++] = '/'; }
+    path[pi] = 0;
+    if (hi == 0) return -1;
+    int r;
+    if (tls) r = net_https_get(host, port, path, desk_web_body, sizeof(desk_web_body));
+    else r = net_http_get(host, port, path, desk_web_body, sizeof(desk_web_body));
+    if (r >= 0) {
+        desk_web_len = (u32)r;
+        desk_web_body[desk_web_len < sizeof(desk_web_body) ? desk_web_len : sizeof(desk_web_body) - 1] = 0;
+        if (net_fetch_truncated()) {
+            set_msg(desk_web_status, "8192 bytes (buffer full, may be truncated)");
+            console_write("web: truncated at 8192\n");
+        } else {
+            char tmp[64]; tmp[0]='O'; tmp[1]='K'; tmp[2]=' '; int n=3;
+            char num[16]; u32_to_str(desk_web_len, num, 10);
+            int t=0; while (num[t]) tmp[n++]=num[t++];
+            tmp[n++]=' '; tmp[n++]='b'; tmp[n++]='y'; tmp[n++]='t'; tmp[n++]='e'; tmp[n++]='s'; tmp[n]=0;
+            set_msg(desk_web_status, tmp);
+            console_printf("web: fetched %u bytes\n", desk_web_len);
+        }
+        return r;
+    }
+    desk_web_len = 0; desk_web_body[0] = 0;
+    if (r == -2) { set_msg(desk_web_status, "certificate refused"); console_write("web: certificate refused\n"); return -2; }
+    set_msg(desk_web_status, "fetch failed");
+    console_write("web: fetch failed\n");
+    return -1;
+}
+static void desk_draw_web_content(int idx, s32 dx, s32 dy, s32 dw, s32 dh) {
+    struct window *wn = &wins[idx];
+    s32 x = wn->x, y = wn->y, w = wn->w;
+    s32 cx = x + 1, cy = y + TITLE_H + 1, cw = w - 2, ch = wn->h - TITLE_H - 2;
+    fb_draw_text_clip(x + 10, y + 32, "Address:", 0x00000000u, 0x00D0D0D0u, dx, dy, dw, dh);
+    fb_fill_rect_clip(x + 80, y + 28, w - 100, 24, 0x00FFFFFFu, dx, dy, dw, dh);
+    draw_text2(x + 84, y + 32, wn->field, 0x00000000u, 0x00FFFFFFu, x + 80, y + 28, w - 100, 24, dx, dy, dw, dh);
+    if (wn->field_focused) fb_fill_rect_clip(x + 84 + wn->field_len * 8, y + 32, 2, 16, 0x00000000u, dx, dy, dw, dh);
+    fb_fill_rect_clip(x + 10, y + 64, 100, 24, 0x00C0C0C0u, dx, dy, dw, dh);
+    draw_text2(x + 18, y + 68, "Fetch", 0x00000000u, 0x00C0C0C0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    fb_fill_rect_clip(x + w - 120, y + 64, 50, 24, 0x00C0C0C0u, dx, dy, dw, dh);
+    draw_text2(x + w - 102, y + 68, "Up", 0x00000000u, 0x00C0C0C0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    fb_fill_rect_clip(x + w - 60, y + 64, 50, 24, 0x00C0C0C0u, dx, dy, dw, dh);
+    draw_text2(x + w - 42, y + 68, "Down", 0x00000000u, 0x00C0C0C0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    draw_text2(x + 130, y + 68, desk_web_status, 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    /* Body as text lines, scrolled by aux1. Long lines wrap at
+       the window width; NUL bytes cannot appear (the fetch
+       buffer is NUL-terminated and body text is drawn per
+       line, stopping at NUL). */
+    int max_chars = (w - 20) / 8;
+    int line = 0, pos = 0, row = 0;
+    int max_rows = (wn->h - 120) / 16;
+    while (desk_web_body[pos] && row < max_rows) {
+        char lbuf[96]; int n = 0;
+        while (desk_web_body[pos] && desk_web_body[pos] != '\n' && n < max_chars && n < 95) {
+            char c = desk_web_body[pos++];
+            lbuf[n++] = (c == '\r' || (unsigned char)c < 32) ? ' ' : c;
+        }
+        if (desk_web_body[pos] == '\n') pos++;
+        lbuf[n] = 0;
+        if (line >= wn->aux1) {
+            draw_text2(x + 10, y + 100 + row * 16, lbuf, 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+            row++;
+        }
+        line++;
+    }
+}
+static int desk_open_web(void) {
+    for (int i = 0; i < MAX_WINDOWS; i++)
+        if (wins[i].used && wins[i].type == W_WEB) { bring_to_front(i); return i; }
+    int id = wm_create("Web", 140, 60, 520, 360, W_WEB);
+    if (id < 0) return -1;
+    int idx = find_by_id(id);
+    if (idx >= 0) {
+        wins[idx].field[0] = 0; wins[idx].field_len = 0; wins[idx].field_focused = 0;
+        wins[idx].aux1 = 0;
+        desk_web_status[0] = 0; desk_web_len = 0; desk_web_body[0] = 0;
+        console_write("Desktop: Web opened\n");
+    }
+    return idx;
+}
+/* Editor: load a file into the static buffer, sanitising bytes
+   that cannot be edited or displayed (NULs and control bytes
+   other than newline become '?'). Refuses files over the cap
+   instead of truncating them. */
+static int desk_editor_load(const char *name) {
+    u32 size = 0;
+    /* Read with the cap: fs_read_as fails if the file does not
+       fit, so an oversize file is refused cleanly here. */
+    u32 sz = 0;
+    if (fs_read_as(name, (u8 *)desk_ed_buf, 8192, &sz, shell_session_uid()) != 0) {
+        /* Distinguish missing from oversize is not possible via
+           this call alone; report the refusal either way. */
+        console_printf("editor: refused %s (missing or over 8192 bytes)\n", name);
+        desk_notify("Editor: file missing or over 8KB, refused");
+        return -1;
+    }
+    size = sz;
+    int sanitized = 0;
+    for (u32 i = 0; i < size; i++) {
+        unsigned char c = (unsigned char)desk_ed_buf[i];
+        if ((c < 32 && c != '\n') || c >= 127) { desk_ed_buf[i] = '?'; sanitized++; }
+    }
+    desk_ed_buf[size] = 0;
+    desk_ed_len = size;
+    int n = 0; while (name[n] && n < 31) { desk_ed_name[n] = name[n]; n++; } desk_ed_name[n] = 0;
+    if (sanitized) console_printf("editor: sanitized %d bytes in %s\n", sanitized, name);
+    console_printf("editor: opened %s %u bytes\n", name, size);
+    return 0;
+}
+static void desk_editor_sync_field(int idx) {
+    /* Filename field follows the loaded file, cursor to the end. */
+    int n = 0; while (desk_ed_name[n] && n < 63) { wins[idx].field[n] = desk_ed_name[n]; n++; }
+    wins[idx].field[n] = 0; wins[idx].field_len = n; wins[idx].field_focused = 0;
+    wins[idx].aux1 = (int)desk_ed_len; wins[idx].aux2 = 0;
+}
+static int desk_open_editor(void) {
+    for (int i = 0; i < MAX_WINDOWS; i++)
+        if (wins[i].used && wins[i].type == W_EDITOR) { bring_to_front(i); desk_editor_sync_field(i); return i; }
+    int id = wm_create("Editor", 140, 60, 520, 360, W_EDITOR);
+    if (id < 0) return -1;
+    int idx = find_by_id(id);
+    if (idx >= 0) {
+        desk_editor_sync_field(idx);
+        console_write("Desktop: Editor opened\n");
+    }
+    return idx;
+}
+static void desk_draw_editor_content(int idx, s32 dx, s32 dy, s32 dw, s32 dh) {
+    struct window *wn = &wins[idx];
+    s32 x = wn->x, y = wn->y, w = wn->w;
+    s32 cx = x + 1, cy = y + TITLE_H + 1, cw = w - 2, ch = wn->h - TITLE_H - 2;
+    fb_draw_text_clip(x + 10, y + 32, "File:", 0x00000000u, 0x00D0D0D0u, dx, dy, dw, dh);
+    fb_fill_rect_clip(x + 60, y + 28, w - 80, 24, 0x00FFFFFFu, dx, dy, dw, dh);
+    draw_text2(x + 64, y + 32, wn->field, 0x00000000u, 0x00FFFFFFu, x + 60, y + 28, w - 80, 24, dx, dy, dw, dh);
+    if (wn->field_focused) fb_fill_rect_clip(x + 64 + wn->field_len * 8, y + 32, 2, 16, 0x00000000u, dx, dy, dw, dh);
+    fb_fill_rect_clip(x + 10, y + 64, 80, 24, 0x00C0C0C0u, dx, dy, dw, dh);
+    draw_text2(x + 18, y + 68, "Save", 0x00000000u, 0x00C0C0C0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    fb_fill_rect_clip(x + 100, y + 64, 80, 24, 0x00C0C0C0u, dx, dy, dw, dh);
+    draw_text2(x + 108, y + 68, "Open", 0x00000000u, 0x00C0C0C0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    draw_text2(x + 200, y + 68, desk_ed_msg, 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    /* Body lines, scrolled by aux2. Cursor (aux1) drawn as a
+       filled block over the character cell. */
+    int max_chars = (w - 20) / 8;
+    int max_rows = (wn->h - 120) / 16;
+    int line = 0, pos = 0, row = 0;
+    int cur_line = 0, cur_col = 0;
+    { int p = 0; while (p < wn->aux1 && desk_ed_buf[p]) { if (desk_ed_buf[p] == '\n') { cur_line++; cur_col = 0; } else cur_col++; p++; } }
+    while (pos < (int)desk_ed_len && row < max_rows) {
+        char lbuf[96]; int n = 0; int lstart = pos;
+        while (pos < (int)desk_ed_len && desk_ed_buf[pos] != '\n' && n < max_chars && n < 95) lbuf[n++] = desk_ed_buf[pos++];
+        if (pos < (int)desk_ed_len && desk_ed_buf[pos] == '\n') pos++;
+        lbuf[n] = 0;
+        (void)lstart;
+        if (line >= wn->aux2) {
+            draw_text2(x + 10, y + 100 + row * 16, lbuf, 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+            if (line == cur_line) {
+                s32 ccx = x + 10 + cur_col * 8, ccy = y + 100 + row * 16;
+                if (cur_col < max_chars) fb_fill_rect_clip(ccx, ccy, 8, 16, 0x00000000u, dx, dy, dw, dh);
+            }
+            row++;
+        }
+        line++;
+    }
+    if (desk_ed_len == 0) fb_fill_rect_clip(x + 10, y + 100, 8, 16, 0x00000000u, dx, dy, dw, dh);
+}
+static void desk_draw_monitor_content(int idx, s32 dx, s32 dy, s32 dw, s32 dh) {
+    struct window *wn = &wins[idx];
+    s32 x = wn->x, y = wn->y;
+    s32 cx = x + 1, cy = y + TITLE_H + 1, cw = wn->w - 2, ch = wn->h - TITLE_H - 2;
+    char num[16], line[96];
+    draw_text2(x + 10, y + 32, "System monitor (updates every second)", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    u32_to_str(timer_ticks / 100, num, 10);
+    draw_text2(x + 10, y + 56, "Uptime (s):", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    draw_text2(x + 130, y + 56, num, 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    u32_to_str(pmm_total_frames() * 4, num, 10);
+    draw_text2(x + 10, y + 76, "Memory total (KiB):", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    draw_text2(x + 200, y + 76, num, 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    u32_to_str(pmm_free_frames() * 4, num, 10);
+    draw_text2(x + 10, y + 96, "Memory free (KiB):", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    draw_text2(x + 200, y + 96, num, 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    u32_to_str((u32)wm_count(), num, 10);
+    draw_text2(x + 10, y + 116, "Windows open:", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    draw_text2(x + 200, y + 116, num, 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    u32_to_str(net_rx_count(), num, 10);
+    draw_text2(x + 10, y + 136, "Net RX packets:", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    draw_text2(x + 200, y + 136, num, 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    u32_to_str(net_tx_count(), num, 10);
+    draw_text2(x + 10, y + 156, "Net TX packets:", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    draw_text2(x + 200, y + 156, num, 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    u32_to_str(net_drop_count(), num, 10);
+    draw_text2(x + 10, y + 176, "Net drops:", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    draw_text2(x + 200, y + 176, num, 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    if (net_ip_configured()) {
+        ip_t a;
+        net_ip_addr(&a); ip_text(a, line);
+        draw_text2(x + 10, y + 196, "IP:", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+        draw_text2(x + 130, y + 196, line, 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    } else {
+        draw_text2(x + 10, y + 196, "IP: (not configured)", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    }
+    (void)line;
+}
+static int desk_open_monitor(void) {
+    for (int i = 0; i < MAX_WINDOWS; i++)
+        if (wins[i].used && wins[i].type == W_MONITOR) { bring_to_front(i); return i; }
+    int id = wm_create("Monitor", 160, 80, 480, 320, W_MONITOR);
+    if (id < 0) return -1;
+    console_write("Desktop: Monitor opened\n");
+    return find_by_id(id);
+}
+/* BMP parsing: 24-bit uncompressed only, at most 128x128. All
+   bounds are checked before any pixel is read, so a truncated
+   or lying header is refused, never over-read. */
+static u16 bmp_u16(const u8 *p) { return (u16)(p[0] | (p[1] << 8)); }
+static u32 bmp_u32(const u8 *p) { return (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) | ((u32)p[3] << 24); }
+static s32 bmp_s32(const u8 *p) { return (s32)bmp_u32(p); }
+static int desk_viewer_load(const char *name) {
+    u32 sz = 0;
+    if (fs_read_as(name, desk_bmp, sizeof(desk_bmp), &sz, shell_session_uid()) != 0) {
+        console_printf("viewer: refused %s (missing or over 128 KiB)\n", name);
+        desk_notify("Viewer: file missing or over 128KB, refused");
+        return -1;
+    }
+    desk_bmp_size = sz;
+    if (sz < 54 || desk_bmp[0] != 'B' || desk_bmp[1] != 'M') {
+        console_printf("viewer: refused %s (not a BMP)\n", name);
+        desk_notify("Viewer: not a BMP file");
+        return -1;
+    }
+    u32 data_off = bmp_u32(desk_bmp + 10);
+    u32 dib = bmp_u32(desk_bmp + 14);
+    s32 w = bmp_s32(desk_bmp + 18), h = bmp_s32(desk_bmp + 22);
+    u16 planes = bmp_u16(desk_bmp + 26), bpp = bmp_u16(desk_bmp + 28);
+    u32 comp = bmp_u32(desk_bmp + 30);
+    if (dib < 40 || planes != 1 || bpp != 24 || comp != 0) {
+        console_printf("viewer: refused %s (only 24-bit uncompressed BMP)\n", name);
+        desk_notify("Viewer: only 24-bit uncompressed BMP");
+        return -1;
+    }
+    s32 ah = h < 0 ? -h : h;
+    if (w <= 0 || w > 128 || ah <= 0 || ah > 128) {
+        console_printf("viewer: refused %s (oversize %dx%d, cap 128x128)\n", name, w, ah);
+        desk_notify("Viewer: image over 128x128, refused");
+        return -1;
+    }
+    u32 stride = (u32)(((w * 3) + 3) & ~3);
+    if (data_off >= sz || stride * (u32)ah > sz - data_off) {
+        console_printf("viewer: refused %s (truncated pixel data)\n", name);
+        desk_notify("Viewer: truncated pixel data");
+        return -1;
+    }
+    desk_bmp_w = w; desk_bmp_h = ah; desk_bmp_ok = 1;
+    int n = 0; while (name[n] && n < 31) { desk_bmp_name[n] = name[n]; n++; } desk_bmp_name[n] = 0;
+    set_msg(desk_bmp_msg, "OK");
+    console_printf("viewer: opened %s %dx%d\n", name, w, ah);
+    return 0;
+}
+static int desk_open_viewer(void) {
+    for (int i = 0; i < MAX_WINDOWS; i++)
+        if (wins[i].used && wins[i].type == W_VIEWER) { bring_to_front(i); return i; }
+    int id = wm_create("Viewer", 160, 60, 480, 360, W_VIEWER);
+    if (id < 0) return -1;
+    console_write("Desktop: Viewer opened\n");
+    return find_by_id(id);
+}
+static void desk_draw_viewer_content(int idx, s32 dx, s32 dy, s32 dw, s32 dh) {
+    struct window *wn = &wins[idx];
+    s32 x = wn->x, y = wn->y;
+    s32 cx = x + 1, cy = y + TITLE_H + 1, cw = wn->w - 2, ch = wn->h - TITLE_H - 2;
+    if (!desk_bmp_ok) {
+        draw_text2(x + 10, y + 32, "No image loaded.", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+        draw_text2(x + 10, y + 52, "Open a BMP image from Files.", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+        return;
+    }
+    char info[96]; int n = 0;
+    { int t = 0; while (desk_bmp_name[t] && n < 30) info[n++] = desk_bmp_name[t++]; }
+    info[n++] = ' ';
+    { char num[16]; u32_to_str((u32)desk_bmp_w, num, 10); int t=0; while(num[t]) info[n++]=num[t++]; }
+    info[n++] = 'x';
+    { char num[16]; u32_to_str((u32)desk_bmp_h, num, 10); int t=0; while(num[t]) info[n++]=num[t++]; }
+    info[n] = 0;
+    draw_text2(x + 10, y + 32, info, 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    /* BMP pixel data: BGR triples, rows bottom-up unless the
+       height was negative (top-down). Pixels are inside the
+       client area by construction (128 cap vs 478x338 area),
+       and fb clips them to the dirty rect. */
+    u32 data_off = bmp_u32(desk_bmp + 10);
+    s32 h_raw = bmp_s32(desk_bmp + 22);
+    u32 stride = (u32)(((desk_bmp_w * 3) + 3) & ~3);
+    for (s32 r = 0; r < desk_bmp_h; r++) {
+        s32 frow = h_raw > 0 ? (desk_bmp_h - 1 - r) : r;
+        for (s32 c = 0; c < desk_bmp_w; c++) {
+            u32 off = data_off + (u32)frow * stride + (u32)c * 3;
+            u32 col = ((u32)desk_bmp[off + 2] << 16) | ((u32)desk_bmp[off + 1] << 8) | desk_bmp[off];
+            fb_fill_rect_clip(x + 10 + c, y + 52 + r, 1, 1, col, dx, dy, dw, dh);
+        }
+    }
+}
+
 static void desk_draw_taskbar(s32 dx, s32 dy, s32 dw, s32 dh) {
     s32 sw = scr_w(), sh = scr_h();
-    fb_fill_rect_clip(0, sh - TASKBAR_H, sw, TASKBAR_H, DESK_TASKBAR, dx, dy, dw, dh);
+    u32 tcol = desk_taskbar_col();
+    u32 ttext = desk_taskbar_text_col();
+    fb_fill_rect_clip(0, sh - TASKBAR_H, sw, TASKBAR_H, tcol, dx, dy, dw, dh);
     fb_fill_rect_clip(2, sh - TASKBAR_H + 2, 60, TASKBAR_H - 4, 0x00606060u, dx, dy, dw, dh);
     fb_draw_text_clip(8, sh - TASKBAR_H + 5, "Start", 0x00FFFFFFu, 0x00606060u, dx, dy, dw, dh);
     s32 bx = 66;
     for (int zi = 0; zi < zcount; zi++) {
         struct window *wn = &wins[zorder[zi]];
+        if (wn->ws != desk_ws) continue; /* other workspace: not listed here */
         if (bx + 120 > sw) break;
         u32 bg = wn->focused ? 0x00808080u : (wn->minimized ? 0x00505050u : 0x00606060u);
         fb_fill_rect_clip(bx, sh - TASKBAR_H + 2, 118, TASKBAR_H - 4, bg, dx, dy, dw, dh);
         fb_draw_text_clip(bx + 4, sh - TASKBAR_H + 5, wn->title, 0x00FFFFFFu, bg, dx, dy, dw, dh);
         bx += 122;
     }
+    /* Workspace button, left of the tray. */
+    fb_fill_rect_clip(sw - 258, sh - TASKBAR_H + 2, 44, TASKBAR_H - 4, 0x00606060u, dx, dy, dw, dh);
+    fb_draw_text_clip(sw - 252, sh - TASKBAR_H + 5, desk_ws == 0 ? "WS1" : "WS2", 0x00FFFFFFu, 0x00606060u, dx, dy, dw, dh);
     /* Tray, right-aligned: user, clock, bell, gear. */
     char clk[16]; clock_text(clk);
-    fb_draw_text_clip(sw - 110, sh - TASKBAR_H + 5, clk, 0x00FFFFFFu, DESK_TASKBAR, dx, dy, dw, dh);
-    fb_draw_text_clip(sw - 200, sh - TASKBAR_H + 5, shell_session_name(), 0x00FFFFFFu, DESK_TASKBAR, dx, dy, dw, dh);
+    fb_draw_text_clip(sw - 110, sh - TASKBAR_H + 5, clk, ttext, tcol, dx, dy, dw, dh);
+    fb_draw_text_clip(sw - 200, sh - TASKBAR_H + 5, shell_session_name(), ttext, tcol, dx, dy, dw, dh);
     /* Bell with count, gear. */
     char bell[8]; bell[0] = 'B'; bell[1] = ':'; bell[2] = (char)('0' + (desk_notif_count > 9 ? 9 : desk_notif_count)); bell[3] = 0;
-    fb_draw_text_clip(sw - 48, sh - TASKBAR_H + 5, bell, 0x00FFFFFFu, DESK_TASKBAR, dx, dy, dw, dh);
-    fb_draw_text_clip(sw - 24, sh - TASKBAR_H + 5, "G", 0x00FFFFFFu, DESK_TASKBAR, dx, dy, dw, dh);
+    fb_draw_text_clip(sw - 48, sh - TASKBAR_H + 5, bell, ttext, tcol, dx, dy, dw, dh);
+    fb_draw_text_clip(sw - 24, sh - TASKBAR_H + 5, "G", ttext, tcol, dx, dy, dw, dh);
 }
 
+/* Phase 10 large text: draw a string at 2x scale (each glyph
+   pixel becomes a 2x2 block), foreground pixels only, so it
+   stays readable over wallpaper patterns. Used for desktop
+   icon labels when the Large text setting is on. */
+static void desk_draw_text2x(s32 x, s32 y, const char *s, u32 fg,
+                             s32 dx, s32 dy, s32 dw, s32 dh) {
+    int col = 0;
+    while (s[col]) {
+        const u8 *glyph = font8x16[(u8)s[col]];
+        for (int row = 0; row < 16; row++) {
+            u8 bits = glyph[row];
+            for (int bit = 0; bit < 8; bit++) {
+                if (bits & (u8)(0x80u >> bit))
+                    fb_fill_rect_clip(x + col * 16 + bit * 2, y + row * 2, 2, 2, fg, dx, dy, dw, dh);
+            }
+        }
+        col++;
+    }
+}
 static void desk_redraw_rect(s32 dx, s32 dy, s32 dw, s32 dh) {
     if (!fb_ready() || dw <= 0 || dh <= 0) return;
     if (desk_locked) {
@@ -1098,37 +1679,73 @@ static void desk_redraw_rect(s32 dx, s32 dy, s32 dw, s32 dh) {
         draw_cursor();
         return;
     }
-    fb_fill_rect_clip(0, 0, scr_w(), scr_h(), DESK_BG, dx, dy, dw, dh);
+    /* Phase 10 wallpaper: solid is the old flat fill; gradient
+       interpolates the theme background toward black in 4px
+       bands; dots puts accent dots on the theme background.
+       Low-resource mode forces solid (no band/dot loops). */
+    if (desk_wallpaper == 1 && !desk_lowres) {
+        u32 bg = desk_bg_col();
+        u32 br = (bg >> 16) & 0xFF, bgc = (bg >> 8) & 0xFF, bb = bg & 0xFF;
+        for (s32 gy = 0; gy < scr_h(); gy += 4) {
+            u32 f = (u32)(scr_h() - gy) * 256u / (u32)scr_h();
+            u32 col = (((br * f / 256u) << 16) | ((bgc * f / 256u) << 8) | (bb * f / 256u));
+            fb_fill_rect_clip(0, gy, scr_w(), 4, col, dx, dy, dw, dh);
+        }
+    } else if (desk_wallpaper == 2 && !desk_lowres) {
+        fb_fill_rect_clip(0, 0, scr_w(), scr_h(), desk_bg_col(), dx, dy, dw, dh);
+        u32 dot = desk_accent_col();
+        for (s32 gy = 24; gy < scr_h(); gy += 48)
+            for (s32 gx = 24; gx < scr_w(); gx += 48)
+                fb_fill_rect_clip(gx, gy, 4, 4, dot, dx, dy, dw, dh);
+    } else {
+        fb_fill_rect_clip(0, 0, scr_w(), scr_h(), desk_bg_col(), dx, dy, dw, dh);
+    }
     if (desk_icons_on) {
         for (int i = 0; i < 6; i++) {
             s32 ix, iy; desk_icon_rect(i, &ix, &iy);
             fb_fill_rect_clip(ix, iy, 48, 48, desk_icon_cols[i], dx, dy, dw, dh);
-            fb_draw_text_clip(ix, iy + 52, desk_icon_labels[i], 0x00FFFFFFu, DESK_BG, dx, dy, dw, dh);
+            if (desk_bigtext) desk_draw_text2x(ix, iy + 52, desk_icon_labels[i], 0x00FFFFFFu, dx, dy, dw, dh);
+            else fb_draw_text_clip(ix, iy + 52, desk_icon_labels[i], 0x00FFFFFFu, desk_bg_col(), dx, dy, dw, dh);
         }
     }
     for (int zi = 0; zi < zcount; zi++) {
         struct window *wn = &wins[zorder[zi]];
         if (wn->minimized) continue;
+        if (wn->ws != desk_ws) continue;
         if (!rects_overlap(wn->x, wn->y, wn->w, wn->h, dx, dy, dw, dh)) continue;
         draw_window_clip(zorder[zi], dx, dy, dw, dh);
         if (wn->type == W_SETTINGS) desk_draw_settings_content(zorder[zi], dx, dy, dw, dh);
         else if (wn->type == W_FILES) desk_draw_files_content(zorder[zi], dx, dy, dw, dh);
         else if (wn->type == W_ABOUT) desk_draw_about_content(zorder[zi], dx, dy, dw, dh);
+        else if (wn->type == W_NETWORK) desk_draw_network_content(zorder[zi], dx, dy, dw, dh);
+        else if (wn->type == W_WEB) desk_draw_web_content(zorder[zi], dx, dy, dw, dh);
+        else if (wn->type == W_EDITOR) desk_draw_editor_content(zorder[zi], dx, dy, dw, dh);
+        else if (wn->type == W_MONITOR) desk_draw_monitor_content(zorder[zi], dx, dy, dw, dh);
+        else if (wn->type == W_VIEWER) desk_draw_viewer_content(zorder[zi], dx, dy, dw, dh);
         /* W_USER content is app-drawn, never redrawn here. */
     }
     /* Panels, on top of windows. */
     s32 sh = scr_h();
     if (desk_launcher_open) {
-        s32 mx0 = 0, my0 = sh - TASKBAR_H - 180, mw = 200, mh = 180;
-        fb_fill_rect_clip(mx0, my0, mw, mh, 0x00C0C0C0u, dx, dy, dw, dh);
+        /* Column 1 keeps the original seven entries at their
+           original coordinates; column 2 (Phase 10 apps) is
+           appended to the right, so older click coordinates
+           still land on the same entries. */
+        s32 mx0 = 0, my0 = sh - TASKBAR_H - 180, mw = 400, mh = 180;
+        u32 pcol = desk_panel_col(), ptext = desk_panel_text_col();
+        fb_fill_rect_clip(mx0, my0, mw, mh, pcol, dx, dy, dw, dh);
         fb_fill_rect_clip(mx0, my0, mw, 1, 0x00000000u, dx, dy, dw, dh);
+        fb_fill_rect_clip(mx0 + 200, my0, 1, mh, 0x00000000u, dx, dy, dw, dh);
         const char *entries[7] = {"Settings", "Files", "Calculator", "About", "Terminal", "Lock", "Exit desktop"};
-        for (int i = 0; i < 7; i++) fb_draw_text_clip(mx0 + 10, my0 + 8 + i * 24, entries[i], 0x00000000u, 0x00C0C0C0u, dx, dy, dw, dh);
+        for (int i = 0; i < 7; i++) fb_draw_text_clip(mx0 + 10, my0 + 8 + i * 24, entries[i], ptext, pcol, dx, dy, dw, dh);
+        const char *entries2[6] = {"Editor", "Monitor", "Network", "Web", "Viewer", "Console"};
+        for (int i = 0; i < 6; i++) fb_draw_text_clip(mx0 + 210, my0 + 8 + i * 24, entries2[i], ptext, pcol, dx, dy, dw, dh);
     }
     if (desk_quick_open) {
         s32 qx = scr_w() - 260, qy = sh - TASKBAR_H - 140;
-        fb_fill_rect_clip(qx, qy, 260, 140, 0x00C0C0C0u, dx, dy, dw, dh);
-        fb_draw_text_clip(qx + 10, qy + 8, "Quick settings", 0x00000000u, 0x00C0C0C0u, dx, dy, dw, dh);
+        u32 pcol = desk_panel_col(), ptext = desk_panel_text_col();
+        fb_fill_rect_clip(qx, qy, 260, 140, pcol, dx, dy, dw, dh);
+        fb_draw_text_clip(qx + 10, qy + 8, "Quick settings", ptext, pcol, dx, dy, dw, dh);
         char v1[32], v2[32], v3[32], v4[32];
         idle_text(v1); mouse_text(v2);
         v3[0]='2'; v3[1]='4'; v3[2]='h'; v3[3]=0; if (!desk_clock_24) { v3[0]='1'; v3[1]='2'; v3[2]='h'; v3[3]=0; }
@@ -1136,7 +1753,7 @@ static void desk_redraw_rect(s32 dx, s32 dy, s32 dw, s32 dh) {
         const char *qn[4] = {"Idle", "Mouse", "Clock", "Icons"};
         const char *qv[4] = {v1, v2, v3, v4};
         for (int i = 0; i < 4; i++) {
-            fb_draw_text_clip(qx + 10, qy + 32 + i * 22, qn[i], 0x00000000u, 0x00C0C0C0u, dx, dy, dw, dh);
+            fb_draw_text_clip(qx + 10, qy + 32 + i * 22, qn[i], ptext, pcol, dx, dy, dw, dh);
             fb_fill_rect_clip(qx + 120, qy + 28 + i * 22, 100, 20, 0x00E0E0E0u, dx, dy, dw, dh);
             fb_draw_text_clip(qx + 126, qy + 32 + i * 22, qv[i], 0x00000000u, 0x00E0E0E0u, dx, dy, dw, dh);
         }
@@ -1145,10 +1762,11 @@ static void desk_redraw_rect(s32 dx, s32 dy, s32 dw, s32 dh) {
     }
     if (desk_notif_open) {
         s32 nx = scr_w() - 300, ny = sh - TASKBAR_H - 200;
-        fb_fill_rect_clip(nx, ny, 300, 200, 0x00C0C0C0u, dx, dy, dw, dh);
-        fb_draw_text_clip(nx + 10, ny + 8, "Notifications", 0x00000000u, 0x00C0C0C0u, dx, dy, dw, dh);
-        if (desk_notif_count == 0) fb_draw_text_clip(nx + 10, ny + 32, "(none)", 0x00000000u, 0x00C0C0C0u, dx, dy, dw, dh);
-        for (int i = 0; i < desk_notif_count && i < 7; i++) fb_draw_text_clip(nx + 10, ny + 32 + i * 20, desk_notif[i], 0x00000000u, 0x00C0C0C0u, dx, dy, dw, dh);
+        u32 pcol = desk_panel_col(), ptext = desk_panel_text_col();
+        fb_fill_rect_clip(nx, ny, 300, 200, pcol, dx, dy, dw, dh);
+        fb_draw_text_clip(nx + 10, ny + 8, "Notifications", ptext, pcol, dx, dy, dw, dh);
+        if (desk_notif_count == 0) fb_draw_text_clip(nx + 10, ny + 32, "(none)", ptext, pcol, dx, dy, dw, dh);
+        for (int i = 0; i < desk_notif_count && i < 7; i++) fb_draw_text_clip(nx + 10, ny + 32 + i * 20, desk_notif[i], ptext, pcol, dx, dy, dw, dh);
         fb_fill_rect_clip(nx + 10, ny + 176, 80, 20, 0x00E0E0E0u, dx, dy, dw, dh);
         fb_draw_text_clip(nx + 16, ny + 180, "Clear", 0x00000000u, 0x00E0E0E0u, dx, dy, dw, dh);
     }
@@ -1232,6 +1850,7 @@ static int desk_open_settings(void) {
     if (idx >= 0) {
         wins[idx].search[0] = 0; wins[idx].search_len = 0;
         wins[idx].field[0] = 0; wins[idx].field_focused = 0;
+        wins[idx].aux1 = 0;
         desk_at_settings_opened = 1;
         console_write("Desktop: Settings opened\n");
     }
@@ -1305,11 +1924,64 @@ static void desk_do_action(int action, int *exit_desktop) {
     else if (action == 3) desk_open_about();
     else if (action == 4 || action == 6) { *exit_desktop = 1; desk_at_terminal_exit = 1; }
     else if (action == 5) desk_show_lock();
+    /* Phase 10 launcher column 2. */
+    else if (action == 7) {
+        desk_ed_len = 0; desk_ed_buf[0] = 0;
+        { const char *t = "notes.txt"; int n = 0; while (t[n]) { desk_ed_name[n] = t[n]; n++; } desk_ed_name[n] = 0; }
+        desk_ed_msg[0] = 0;
+        desk_open_editor();
+    }
+    else if (action == 8) desk_open_monitor();
+    else if (action == 9) desk_open_network();
+    else if (action == 10) desk_open_web();
+    else if (action == 11) desk_open_viewer();
+    else if (action == 12) {
+        if (proc_bg_start("term.elf", shell_session_uid()) != 0) {
+            desk_notify("Console not installed: pkg install term.nxpkg, then try again");
+        } else {
+            desk_notify("Console started");
+        }
+    }
+}
+/* Phase 10 snap: left half (0), right half (1), or
+   maximise/restore toggle (2), applied to the topmost
+   non-minimised window on the current workspace. The first
+   snap saves the geometry; restore returns to it. */
+static void desk_snap_topmost(int mode) {
+    int wi = -1;
+    for (int zi = zcount - 1; zi >= 0; zi--) {
+        if (!wins[zorder[zi]].minimized && wins[zorder[zi]].ws == desk_ws) { wi = zorder[zi]; break; }
+    }
+    if (wi < 0) return;
+    struct window *wn = &wins[wi];
+    if (mode == 0 || mode == 1) {
+        if (!wn->snapped) { wn->old_x = wn->x; wn->old_y = wn->y; wn->old_w = wn->w; wn->old_h = wn->h; wn->snapped = 1; }
+        wn->maximized = 0;
+        wn->y = 0; wn->h = scr_h() - TASKBAR_H;
+        if (mode == 0) { wn->x = 0; wn->w = scr_w() / 2; }
+        else { wn->x = scr_w() / 2; wn->w = scr_w() - scr_w() / 2; }
+        console_printf("Desktop: snapped %s to %s half (x=%d w=%d)\n", wn->title, mode == 0 ? "left" : "right", wn->x, wn->w);
+    } else {
+        if (wn->snapped) {
+            wn->x = wn->old_x; wn->y = wn->old_y; wn->w = wn->old_w; wn->h = wn->old_h; wn->snapped = 0;
+            console_printf("Desktop: snap restored %s (x=%d w=%d)\n", wn->title, wn->x, wn->w);
+        } else if (wn->maximized) {
+            wn->x = wn->old_x; wn->y = wn->old_y; wn->w = wn->old_w; wn->h = wn->old_h; wn->maximized = 0;
+            console_printf("Desktop: snap restored %s (x=%d w=%d)\n", wn->title, wn->x, wn->w);
+        } else {
+            wn->old_x = wn->x; wn->old_y = wn->y; wn->old_w = wn->w; wn->old_h = wn->h; wn->maximized = 1;
+            wn->x = 0; wn->y = 0; wn->w = scr_w(); wn->h = scr_h() - TASKBAR_H;
+            console_printf("Desktop: snapped %s to full (x=%d w=%d)\n", wn->title, wn->x, wn->w);
+        }
+    }
+    if (wn->type == W_USER) gui_queue_event(wn, GUI_EV_EXPOSE, 0, 0, 0, 0);
+    desk_redraw();
 }
 static int wm_desktop_internal(int autotest) {
     if (!fb_ready()) { console_write("desktop: no framebuffer available\n"); return -1; }
     /* Reset desktop state, load persistent settings, start. */
     memset(wins, 0, sizeof(wins)); zcount = 0; next_id = 1;
+    desk_ws = 0;
     desk_launcher_open = desk_quick_open = desk_notif_open = 0;
     desk_locked = 0; desk_lock_len = 0; desk_lock_failures = 0;
     desk_notif_count = 0;
@@ -1337,10 +2009,159 @@ static int wm_desktop_internal(int autotest) {
         if (autotest) {
             u32 elapsed = timer_ticks - start_ticks;
             int step = (int)(elapsed / 30);
-            int max_step = autotest == 2 ? 15 : (autotest == 3 ? 6 : 11);
+            int max_step = autotest == 2 ? 15 : (autotest == 3 ? 6 :
+                (autotest == 4 ? 21 : (autotest == 5 ? 36 :
+                (autotest == 6 ? 27 : (autotest == 7 ? 40 :
+                (autotest == 8 ? 3 : 11))))));
             if (step != auto_step && step <= max_step) {
                 auto_step = step;
-                if (autotest == 3) {
+                if (autotest == 4) {
+                    /* Phase 10 polish script, 30 ticks per step:
+                       0-2 Settings icon; 3-5 Appearance toggle;
+                       6-8 Theme value (Classic -> Dark); 9-11 Save;
+                       12-13 workspace button (WS1 -> WS2);
+                       14 sample a pixel inside the Settings
+                       window (must be dark desktop bg, the
+                       window is hidden on WS2); 15-16 back to
+                       WS1; 17 sample again (must be client
+                       grey); 18 '[' snaps Settings left;
+                       19 print geometry; 20 '\' restores;
+                       21 print geometry. */
+                    if (step == 0) mouse_test_set(40, 40, 0);
+                    else if (step == 1) mouse_test_set(40, 40, 1);
+                    else if (step == 2) mouse_test_set(40, 40, 0);
+                    else if (step == 3) mouse_test_set(240, 344, 0);
+                    else if (step == 4) mouse_test_set(240, 344, 1);
+                    else if (step == 5) mouse_test_set(240, 344, 0);
+                    else if (step == 6) mouse_test_set(410, 156, 0);
+                    else if (step == 7) mouse_test_set(410, 156, 1);
+                    else if (step == 8) mouse_test_set(410, 156, 0);
+                    else if (step == 9) mouse_test_set(230, 368, 0);
+                    else if (step == 10) mouse_test_set(230, 368, 1);
+                    else if (step == 11) mouse_test_set(230, 368, 0);
+                    else if (step == 12) mouse_test_set(564, 588, 1);
+                    else if (step == 13) mouse_test_set(564, 588, 0);
+                    else if (step == 14 || step == 17) {
+                        int si = -1;
+                        for (int i = 0; i < MAX_WINDOWS; i++) if (wins[i].used && wins[i].type == W_SETTINGS) si = i;
+                        if (si >= 0) console_printf("p10: ws%d pixel 0x%x\n", step == 14 ? 2 : 1, fb_read_pixel(300, 200));
+                        else console_write("p10: no settings window\n");
+                    }
+                    else if (step == 15) mouse_test_set(564, 588, 1);
+                    else if (step == 16) mouse_test_set(564, 588, 0);
+                    else if (step == 18) keyboard_inject_char('[');
+                    else if (step == 19 || step == 21) {
+                        int si = -1;
+                        for (int i = 0; i < MAX_WINDOWS; i++) if (wins[i].used && wins[i].type == W_SETTINGS) si = i;
+                        if (si >= 0) console_printf("p10: %s x=%d w=%d\n", step == 19 ? "snapped" : "restored", wins[si].x, wins[si].w);
+                    }
+                    else if (step == 20) keyboard_inject_char('\\');
+                } else if (autotest == 5) {
+                    /* Phase 10 apps script: Start, then launcher
+                       column 2 entries (Editor, Monitor, Network,
+                       Web, Viewer, Console), then Files: select
+                       notes.txt, Open (Editor), close Editor,
+                       select pic.bmp, Open (Viewer). */
+                    if (step == 0) mouse_test_set(32, 588, 1);
+                    else if (step == 1) mouse_test_set(32, 588, 0);
+                    else if (step == 2) mouse_test_set(300, 408, 1);
+                    else if (step == 3) mouse_test_set(300, 408, 0);
+                    else if (step == 4) mouse_test_set(32, 588, 1);
+                    else if (step == 5) mouse_test_set(32, 588, 0);
+                    else if (step == 6) mouse_test_set(300, 432, 1);
+                    else if (step == 7) mouse_test_set(300, 432, 0);
+                    else if (step == 8) mouse_test_set(32, 588, 1);
+                    else if (step == 9) mouse_test_set(32, 588, 0);
+                    else if (step == 10) mouse_test_set(300, 456, 1);
+                    else if (step == 11) mouse_test_set(300, 456, 0);
+                    else if (step == 12) mouse_test_set(32, 588, 1);
+                    else if (step == 13) mouse_test_set(32, 588, 0);
+                    else if (step == 14) mouse_test_set(300, 480, 1);
+                    else if (step == 15) mouse_test_set(300, 480, 0);
+                    else if (step == 16) mouse_test_set(32, 588, 1);
+                    else if (step == 17) mouse_test_set(32, 588, 0);
+                    else if (step == 18) mouse_test_set(300, 504, 1);
+                    else if (step == 19) mouse_test_set(300, 504, 0);
+                    else if (step == 20) mouse_test_set(32, 588, 1);
+                    else if (step == 21) mouse_test_set(32, 588, 0);
+                    else if (step == 22) mouse_test_set(300, 528, 1);
+                    else if (step == 23) mouse_test_set(300, 528, 0);
+                    else if (step == 24) mouse_test_set(40, 132, 0);
+                    else if (step == 25) mouse_test_set(40, 132, 1);
+                    else if (step == 26) mouse_test_set(40, 132, 0);
+                    else if (step == 27) mouse_test_set(200, 122, 1);
+                    else if (step == 28) mouse_test_set(200, 122, 0);
+                    else if (step == 29) mouse_test_set(220, 376, 1);
+                    else if (step == 30) mouse_test_set(220, 376, 0);
+                    else if (step == 31) mouse_test_set(652, 70, 1);
+                    else if (step == 32) mouse_test_set(652, 70, 0);
+                    else if (step == 33) mouse_test_set(200, 144, 1);
+                    else if (step == 34) mouse_test_set(200, 144, 0);
+                    else if (step == 35) mouse_test_set(220, 376, 1);
+                    else if (step == 36) mouse_test_set(220, 376, 0);
+                } else if (autotest == 6) {
+                    /* Phase 10 security script: Settings (garbage
+                       settings.txt is rejected at load), Files,
+                       then evil.txt -> Editor (sanitised), close,
+                       empty.txt -> Editor, close, big.bmp ->
+                       Viewer refused, good.bmp -> Viewer opened,
+                       close Viewer. Disk order: evil, empty,
+                       big.bmp, good.bmp, settings.txt. */
+                    if (step == 0) mouse_test_set(40, 40, 0);
+                    else if (step == 1) mouse_test_set(40, 40, 1);
+                    else if (step == 2) mouse_test_set(40, 40, 0);
+                    else if (step == 3) mouse_test_set(40, 132, 0);
+                    else if (step == 4) mouse_test_set(40, 132, 1);
+                    else if (step == 5) mouse_test_set(40, 132, 0);
+                    else if (step == 6) mouse_test_set(200, 122, 1);
+                    else if (step == 7) mouse_test_set(200, 122, 0);
+                    else if (step == 8) mouse_test_set(220, 376, 1);
+                    else if (step == 9) mouse_test_set(220, 376, 0);
+                    else if (step == 10) mouse_test_set(652, 70, 1);
+                    else if (step == 11) mouse_test_set(652, 70, 0);
+                    else if (step == 12) mouse_test_set(200, 144, 1);
+                    else if (step == 13) mouse_test_set(200, 144, 0);
+                    else if (step == 14) mouse_test_set(220, 376, 1);
+                    else if (step == 15) mouse_test_set(220, 376, 0);
+                    else if (step == 16) mouse_test_set(652, 70, 1);
+                    else if (step == 17) mouse_test_set(652, 70, 0);
+                    else if (step == 18) mouse_test_set(200, 166, 1);
+                    else if (step == 19) mouse_test_set(200, 166, 0);
+                    else if (step == 20) mouse_test_set(220, 376, 1);
+                    else if (step == 21) mouse_test_set(220, 376, 0);
+                    else if (step == 22) mouse_test_set(200, 188, 1);
+                    else if (step == 23) mouse_test_set(200, 188, 0);
+                    else if (step == 24) mouse_test_set(220, 376, 1);
+                    else if (step == 25) mouse_test_set(220, 376, 0);
+                    else if (step == 26) mouse_test_set(632, 70, 1);
+                    else if (step == 27) mouse_test_set(632, 70, 0);
+                } else if (autotest == 7) {
+                    /* Phase 10 web script (slirp): Start, Web,
+                       focus the address field, type a host/path
+                       for a 20000-byte page, Fetch. The fetch
+                       blocks the loop, so later steps are just
+                       waiting time for the marker. */
+                    if (step == 0) mouse_test_set(32, 588, 1);
+                    else if (step == 1) mouse_test_set(32, 588, 0);
+                    else if (step == 2) mouse_test_set(300, 480, 1);
+                    else if (step == 3) mouse_test_set(300, 480, 0);
+                    else if (step == 4) mouse_test_set(300, 100, 1);
+                    else if (step == 5) mouse_test_set(300, 100, 0);
+                    else if (step >= 6 && step <= 27) {
+                        const char *addr = "10.0.2.2:18081/big.txt";
+                        keyboard_inject_char(addr[step - 6]);
+                    }
+                    else if (step == 28) mouse_test_set(190, 132, 1);
+                    else if (step == 29) mouse_test_set(190, 132, 0);
+                } else if (autotest == 8) {
+                    /* Phase 10 no-NIC script (boot with -nic
+                       none): Start, Network. The open prints
+                       the no-device marker. */
+                    if (step == 0) mouse_test_set(32, 588, 1);
+                    else if (step == 1) mouse_test_set(32, 588, 0);
+                    else if (step == 2) mouse_test_set(300, 456, 1);
+                    else if (step == 3) mouse_test_set(300, 456, 0);
+                } else if (autotest == 3) {
                     /* Calculator launch test, 30 ticks per step:
                        0-2: click Calc icon (starts Calculator as a
                        background job; it opens its window via GUI
@@ -1428,12 +2249,63 @@ static int wm_desktop_internal(int autotest) {
                     }
                     if (!pending_redraw) { pend_x = wn->x; pend_y = wn->y; pend_w = wn->w; pend_h = wn->h; pending_redraw = 1; }
                 } else {
-                    /* Focused user window gets the key. */
-                    for (int i = 0; i < MAX_WINDOWS; i++) {
-                        if (wins[i].used && wins[i].type == W_USER && wins[i].focused) {
-                            gui_queue_event(&wins[i], GUI_EV_KEY, 0, 0, c, 0);
-                            break;
+                    /* Focused window gets the key, by type. Input
+                       windows consume their keys; anything else
+                       falls through to the desktop-global keys
+                       (shortcuts + snap). */
+                    int fidx = -1;
+                    for (int i = 0; i < MAX_WINDOWS; i++)
+                        if (wins[i].used && wins[i].focused && wins[i].ws == desk_ws) fidx = i;
+                    if (fidx >= 0 && wins[fidx].type == W_EDITOR) {
+                        struct window *wn = &wins[fidx];
+                        if (wn->field_focused) {
+                            if (c == '\b') { if (wn->field_len > 0) wn->field[--wn->field_len] = 0; }
+                            else if (c == '\n') wn->field_focused = 0;
+                            else if (c >= 32 && c < 127 && wn->field_len < 63) { wn->field[wn->field_len++] = (char)c; wn->field[wn->field_len] = 0; }
+                        } else {
+                            if (c == '\b') {
+                                if (wn->aux1 > 0) {
+                                    memmove(&desk_ed_buf[wn->aux1 - 1], &desk_ed_buf[wn->aux1], desk_ed_len - (u32)wn->aux1);
+                                    desk_ed_len--; wn->aux1--; desk_ed_buf[desk_ed_len] = 0;
+                                }
+                            } else if (c == '[') { if (wn->aux1 > 0) wn->aux1--; }
+                            else if (c == ']') { if (wn->aux1 < (int)desk_ed_len) wn->aux1++; }
+                            else if (c == '\n') {
+                                if (desk_ed_len < 8192) {
+                                    memmove(&desk_ed_buf[wn->aux1 + 1], &desk_ed_buf[wn->aux1], desk_ed_len - (u32)wn->aux1);
+                                    desk_ed_buf[wn->aux1] = '\n'; wn->aux1++; desk_ed_len++; desk_ed_buf[desk_ed_len] = 0;
+                                }
+                            }
+                            else if (c >= 32 && c < 127 && desk_ed_len < 8192) {
+                                memmove(&desk_ed_buf[wn->aux1 + 1], &desk_ed_buf[wn->aux1], desk_ed_len - (u32)wn->aux1);
+                                desk_ed_buf[wn->aux1] = (char)c; wn->aux1++; desk_ed_len++; desk_ed_buf[desk_ed_len] = 0;
+                            }
                         }
+                        if (!pending_redraw) { pend_x = wn->x; pend_y = wn->y; pend_w = wn->w; pend_h = wn->h; pending_redraw = 1; }
+                    } else if (fidx >= 0 && wins[fidx].type == W_WEB) {
+                        struct window *wn = &wins[fidx];
+                        if (wn->field_focused) {
+                            if (c == '\b') { if (wn->field_len > 0) wn->field[--wn->field_len] = 0; }
+                            else if (c == '\n') { wn->field_focused = 0; desk_web_fetch(wn->field); wn->aux1 = 0; }
+                            else if (c >= 32 && c < 127 && wn->field_len < 63) { wn->field[wn->field_len++] = (char)c; wn->field[wn->field_len] = 0; }
+                            if (!pending_redraw) { pend_x = wn->x; pend_y = wn->y; pend_w = wn->w; pend_h = wn->h; pending_redraw = 1; }
+                        }
+                    } else if (fidx >= 0 && wins[fidx].type == W_USER) {
+                        gui_queue_event(&wins[fidx], GUI_EV_KEY, 0, 0, c, 0);
+                    } else {
+                        /* Desktop-global keys. Shortcut letters
+                           match case-insensitively. */
+                        char lc = c;
+                        if (lc >= 'A' && lc <= 'Z') lc = (char)(lc + 32);
+                        char lock_k = desk_shortcut_keys[desk_shortcut_preset][0];
+                        char ws_k = desk_shortcut_keys[desk_shortcut_preset][1];
+                        if (lock_k >= 'A' && lock_k <= 'Z') lock_k = (char)(lock_k + 32);
+                        if (ws_k >= 'A' && ws_k <= 'Z') ws_k = (char)(ws_k + 32);
+                        if (lc == lock_k) { desk_show_lock(); desk_redraw(); }
+                        else if (lc == ws_k) { desk_ws = desk_ws ? 0 : 1; console_printf("Desktop: workspace %d\n", desk_ws + 1); desk_redraw(); }
+                        else if (c == '[') desk_snap_topmost(0);
+                        else if (c == ']') desk_snap_topmost(1);
+                        else if (c == '\\') desk_snap_topmost(2);
                     }
                 }
             }
@@ -1465,6 +2337,7 @@ static int wm_desktop_internal(int autotest) {
                 s32 my0 = scr_h() - TASKBAR_H - 180;
                 int hit = -1;
                 for (int i = 0; i < 7; i++) if (inside(mx, my, 0, my0 + i * 24, 200, 24)) hit = i;
+                if (hit < 0) for (int i = 0; i < 6; i++) if (inside(mx, my, 200, my0 + i * 24, 200, 24)) hit = 7 + i;
                 desk_launcher_open = 0;
                 if (hit >= 0) { desk_do_action(hit, &exit_desktop); if (!exit_desktop) desk_redraw(); }
                 else desk_redraw();
@@ -1490,10 +2363,16 @@ static int wm_desktop_internal(int autotest) {
                 if (mx < 64) { desk_launcher_open = 1; desk_redraw(); }
                 else if (mx >= scr_w() - 24) { desk_quick_open = 1; desk_redraw(); }
                 else if (mx >= scr_w() - 48) { desk_notif_open = 1; desk_redraw(); }
+                else if (mx >= scr_w() - 258 && mx < scr_w() - 214) {
+                    desk_ws = desk_ws ? 0 : 1;
+                    console_printf("Desktop: workspace %d\n", desk_ws + 1);
+                    desk_redraw();
+                }
                 else {
                     s32 bx = 66;
                     for (int zi = 0; zi < zcount; zi++) {
                         struct window *wn = &wins[zorder[zi]];
+                        if (wn->ws != desk_ws) continue;
                         if (mx >= bx && mx < bx + 118) {
                             if (wn->minimized) wn->minimized = 0;
                             bring_to_front(zorder[zi]);
@@ -1514,6 +2393,7 @@ static int wm_desktop_internal(int autotest) {
                 for (int zi = zcount - 1; zi >= 0; zi--) {
                     struct window *wn = &wins[zorder[zi]];
                     if (wn->minimized) continue;
+                    if (wn->ws != desk_ws) continue;
                     if (inside(mx, my, wn->x, wn->y, wn->w, wn->h)) { on_window = 1; break; }
                 }
                 if (!on_window && desk_icons_on) {
@@ -1528,6 +2408,7 @@ static int wm_desktop_internal(int autotest) {
                         int wi = zorder[zi];
                         struct window *wn = &wins[wi];
                         if (wn->minimized) continue;
+                        if (wn->ws != desk_ws) continue;
                         if (!inside(mx, my, wn->x, wn->y, wn->w, wn->h)) continue;
                         bring_to_front(wi);
                         for (int ci = 0; ci < 3; ci++) {
@@ -1556,23 +2437,45 @@ static int wm_desktop_internal(int autotest) {
                             if (wn->type == W_SETTINGS) {
                                 if (inside(mx, my, wn->x + 80, wn->y + 28, wn->w - 100, 24)) {
                                     wn->field_focused = 1;
+                                } else if (inside(mx, my, wn->x + 10, wn->y + 252, 140, 24)) {
+                                    wn->aux1 = wn->aux1 ? 0 : 1;
+                                    desk_redraw();
                                 } else {
                                     /* Value buttons: rows in order,
                                        filtered by search, same
                                        layout as drawing. */
-                                    const char *names[4] = {"Idle timeout", "Mouse speed", "Clock format", "Desktop icons"};
-                                    int row = 0;
-                                    for (int s = 0; s < 4; s++) {
-                                        if (!str_contains_ci(names[s], wn->search)) continue;
-                                        s32 ry = wn->y + 64 + row * 32;
-                                        if (inside(mx, my, wn->x + 200, ry, 100, 24)) {
-                                            if (s == 0) idle_cycle_next();
-                                            else if (s == 1) mouse_set_scale((mouse_scale() + 1) % 3);
-                                            else if (s == 2) desk_clock_24 = !desk_clock_24;
-                                            else desk_icons_on = !desk_icons_on;
-                                            desk_redraw();
+                                    if (wn->aux1 == 0) {
+                                        const char *names[4] = {"Idle timeout", "Mouse speed", "Clock format", "Desktop icons"};
+                                        int row = 0;
+                                        for (int s = 0; s < 4; s++) {
+                                            if (!str_contains_ci(names[s], wn->search)) continue;
+                                            s32 ry = wn->y + 64 + row * 32;
+                                            if (inside(mx, my, wn->x + 200, ry, 100, 24)) {
+                                                if (s == 0) idle_cycle_next();
+                                                else if (s == 1) mouse_set_scale((mouse_scale() + 1) % 3);
+                                                else if (s == 2) desk_clock_24 = !desk_clock_24;
+                                                else desk_icons_on = !desk_icons_on;
+                                                desk_redraw();
+                                            }
+                                            row++;
                                         }
-                                        row++;
+                                    } else {
+                                        const char *names[6] = {"Theme", "Accent colour", "Wallpaper", "Low-resource", "Large text", "Shortcuts"};
+                                        int row = 0;
+                                        for (int s = 0; s < 6; s++) {
+                                            if (!str_contains_ci(names[s], wn->search)) continue;
+                                            s32 ry = wn->y + 64 + row * 32;
+                                            if (inside(mx, my, wn->x + 200, ry, 100, 24)) {
+                                                if (s == 0) { desk_theme = (desk_theme + 1) % 4; console_printf("Desktop theme changed to %s\n", desk_theme_name()); }
+                                                else if (s == 1) { desk_accent = (desk_accent + 1) % 4; console_printf("Desktop accent changed to %s\n", desk_accent_name()); }
+                                                else if (s == 2) { desk_wallpaper = (desk_wallpaper + 1) % 3; console_printf("Desktop wallpaper changed to %s\n", desk_wallpaper_name()); }
+                                                else if (s == 3) desk_lowres = !desk_lowres;
+                                                else if (s == 4) desk_bigtext = !desk_bigtext;
+                                                else { desk_shortcut_preset = (desk_shortcut_preset + 1) % 3; console_printf("Desktop shortcuts changed to %c/%c\n", desk_shortcut_keys[desk_shortcut_preset][0], desk_shortcut_keys[desk_shortcut_preset][1]); }
+                                                desk_redraw();
+                                            }
+                                            row++;
+                                        }
                                     }
                                 }
                                 if (inside(mx, my, wn->x + 10, wn->y + wn->h - 44, 120, 24)) {
@@ -1596,6 +2499,83 @@ static int wm_desktop_internal(int autotest) {
                                         }
                                         desk_redraw();
                                         break;
+                                    }
+                                }
+                            }
+                            /* Open button (Files) and the Phase 10
+                               window controls live in their own chain:
+                               the row-selection loop above already ran
+                               for Files windows. */
+                            if (wn->type == W_FILES && wn->selected >= 0 && wn->selected < desk_files_count) {
+                                s32 py = wn->y + 32 + 8 * 22 + 8;
+                                if (inside(mx, my, wn->x + 10, py + 68, 100, 24)) {
+                                    const char *nm = desk_files_names[wn->selected];
+                                    int ln = 0; while (nm[ln]) ln++;
+                                    if (ln >= 4 && nm[ln-4]=='.' && nm[ln-3]=='t' && nm[ln-2]=='x' && nm[ln-1]=='t') {
+                                        if (desk_editor_load(nm) == 0) desk_open_editor();
+                                    } else if (ln >= 4 && nm[ln-4]=='.' && nm[ln-3]=='b' && nm[ln-2]=='m' && nm[ln-1]=='p') {
+                                        if (desk_viewer_load(nm) == 0) desk_open_viewer();
+                                    } else {
+                                        desk_notify("No viewer for this file type");
+                                        console_printf("files: no viewer for %s\n", nm);
+                                    }
+                                    desk_redraw();
+                                }
+                            } else if (wn->type == W_NETWORK) {
+                                if (inside(mx, my, wn->x + 10, wn->y + 230, 120, 24)) {
+                                    if (!net_present()) { set_msg(desk_net_msg, "No network device"); console_write("network: dhcp with no device\n"); }
+                                    else if (net_dhcp() == 0) { set_msg(desk_net_msg, "DHCP ok"); console_write("network: dhcp ok\n"); }
+                                    else { set_msg(desk_net_msg, "DHCP failed"); console_write("network: dhcp failed\n"); }
+                                    desk_redraw();
+                                } else if (inside(mx, my, wn->x + 150, wn->y + 230, 140, 24)) {
+                                    if (!net_ip_configured()) { set_msg(desk_net_msg, "Not configured, run DHCP first"); }
+                                    else {
+                                        ip_t gw; net_ip_gateway(&gw);
+                                        if (net_ping(gw) == 0) set_msg(desk_net_msg, "Ping reply received");
+                                        else set_msg(desk_net_msg, "Ping failed");
+                                        console_printf("network: ping gateway %s\n", desk_net_msg);
+                                    }
+                                    desk_redraw();
+                                }
+                            } else if (wn->type == W_WEB) {
+                                if (inside(mx, my, wn->x + 80, wn->y + 28, wn->w - 100, 24)) wn->field_focused = 1;
+                                else if (inside(mx, my, wn->x + 10, wn->y + 64, 100, 24)) { desk_web_fetch(wn->field); wn->aux1 = 0; desk_redraw(); }
+                                else if (inside(mx, my, wn->x + wn->w - 120, wn->y + 64, 50, 24)) { if (wn->aux1 > 0) wn->aux1--; desk_redraw(); }
+                                else if (inside(mx, my, wn->x + wn->w - 60, wn->y + 64, 50, 24)) { wn->aux1++; desk_redraw(); }
+                                else wn->field_focused = 0;
+                            } else if (wn->type == W_EDITOR) {
+                                if (inside(mx, my, wn->x + 60, wn->y + 28, wn->w - 80, 24)) wn->field_focused = 1;
+                                else if (inside(mx, my, wn->x + 10, wn->y + 64, 80, 24)) {
+                                    if (wn->field_len == 0) { set_msg(desk_ed_msg, "No filename"); }
+                                    else if (fs_write_as(wn->field, (const u8 *)desk_ed_buf, desk_ed_len, shell_session_uid(), 0644) == 0) {
+                                        char tmp[64]; tmp[0]='S'; tmp[1]='a'; tmp[2]='v'; tmp[3]='e'; tmp[4]='d'; tmp[5]=' '; int n=6;
+                                        char num[16]; u32_to_str(desk_ed_len, num, 10);
+                                        int t=0; while (num[t]) tmp[n++]=num[t++];
+                                        tmp[n++]=' '; tmp[n++]='b'; tmp[n++]='y'; tmp[n++]='t'; tmp[n++]='e'; tmp[n++]='s'; tmp[n]=0;
+                                        set_msg(desk_ed_msg, tmp);
+                                        { int k = 0; while (wn->field[k] && k < 31) { desk_ed_name[k] = wn->field[k]; k++; } desk_ed_name[k] = 0; }
+                                        console_printf("editor: saved %s %u bytes\n", wn->field, desk_ed_len);
+                                    } else { set_msg(desk_ed_msg, "Save failed"); console_write("editor: save failed\n"); }
+                                    desk_redraw();
+                                } else if (inside(mx, my, wn->x + 100, wn->y + 64, 80, 24)) {
+                                    if (wn->field_len > 0 && desk_editor_load(wn->field) == 0) {
+                                        desk_editor_sync_field(wi);
+                                        set_msg(desk_ed_msg, "Opened");
+                                    }
+                                    desk_redraw();
+                                } else {
+                                    wn->field_focused = 0;
+                                    /* Click in body: place the cursor. */
+                                    int line = (my - (wn->y + 100)) / 16 + wn->aux2;
+                                    int col = (mx - (wn->x + 10)) / 8;
+                                    if (line >= 0 && col >= 0) {
+                                        int p = 0, l = 0;
+                                        while (l < line && desk_ed_buf[p]) { if (desk_ed_buf[p] == '\n') l++; p++; }
+                                        int ls = p, ll = 0;
+                                        while (desk_ed_buf[p] && desk_ed_buf[p] != '\n') { p++; ll++; }
+                                        if (col > ll) col = ll;
+                                        wn->aux1 = ls + col;
+                                        desk_redraw();
                                     }
                                 }
                             } else if (wn->type == W_USER) {
@@ -1667,11 +2647,22 @@ static int wm_desktop_internal(int autotest) {
                 if (!pending_redraw) { pend_x = 0; pend_y = scr_h() - TASKBAR_H; pend_w = scr_w(); pend_h = TASKBAR_H; pending_redraw = 1; }
             }
         }
+        /* Phase 10: Monitor window refresh, once per second. */
+        {
+            static u32 last_mon_ticks = 0;
+            int mon_idx = -1;
+            for (int i = 0; i < MAX_WINDOWS; i++)
+                if (wins[i].used && wins[i].type == W_MONITOR && !wins[i].minimized && wins[i].ws == desk_ws) mon_idx = i;
+            if (mon_idx >= 0 && timer_ticks - last_mon_ticks >= 100) {
+                last_mon_ticks = timer_ticks;
+                if (!pending_redraw) { pend_x = wins[mon_idx].x; pend_y = wins[mon_idx].y; pend_w = wins[mon_idx].w; pend_h = wins[mon_idx].h; pending_redraw = 1; }
+            }
+        }
         /* Desktop idle lock. */
         if (!desk_locked && shell_idle_minutes() != 0 && timer_ticks - desk_last_activity > shell_idle_minutes() * 6000u) {
             desk_show_lock(); desk_redraw();
         }
-        if (pending_redraw && timer_ticks - last_redraw_ticks >= 2) {
+        if (pending_redraw && timer_ticks - last_redraw_ticks >= (u32)desk_throttle_ticks()) {
             if ((u32)pend_w * (u32)pend_h > 200000u) desk_redraw();
             else desk_redraw_rect(pend_x, pend_y, pend_w, pend_h);
             pending_redraw = 0; last_redraw_ticks = timer_ticks;
@@ -1709,4 +2700,32 @@ int wm_desktop_autotest(void) {
                    ok ? "PASS" : "FAIL", rc, desk_at_settings_opened, desk_at_idle_cycled,
                    desk_at_lock_shown, desk_at_lock_unlocked, desk_at_terminal_exit);
     return ok ? 0 : -1;
+}
+/* Phase 10 test-only entry points. Like the security and calc
+   tests, these do not return on their own; the harness ends
+   the run after the markers appear and checks the log. */
+int wm_desktop_p10test(void) {
+    int rc = wm_desktop_internal(4);
+    console_printf("desktopp10test returned (rc=%d)\n", rc);
+    return rc;
+}
+int wm_desktop_appstest(void) {
+    int rc = wm_desktop_internal(5);
+    console_printf("desktopappstest returned (rc=%d)\n", rc);
+    return rc;
+}
+int wm_desktop_p10sec(void) {
+    int rc = wm_desktop_internal(6);
+    console_printf("desktopp10sec returned (rc=%d)\n", rc);
+    return rc;
+}
+int wm_desktop_webtest(void) {
+    int rc = wm_desktop_internal(7);
+    console_printf("desktopwebtest returned (rc=%d)\n", rc);
+    return rc;
+}
+int wm_desktop_nonictest(void) {
+    int rc = wm_desktop_internal(8);
+    console_printf("desktopnonictest returned (rc=%d)\n", rc);
+    return rc;
 }

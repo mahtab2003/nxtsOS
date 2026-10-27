@@ -4,6 +4,41 @@ An original, ultra-lightweight desktop operating system, built from scratch.
 Not a Linux distribution, not a fork, not a re-themed desktop: nxtsOS boots
 its own kernel.
 
+## Status — v0.10.0 (Phase 10: modern desktop and applications)
+
+What actually works in v0.10.0, verified by booting the real ISO in QEMU and in Bochs 2.7:
+
+- Everything from v0.9.0, plus a polished desktop: four
+  themes (Classic/Dark/Light/High-contrast), accent
+  colours, three wallpapers, low-resource mode, large
+  text, configurable shortcut presets, two workspaces,
+  and window snapping (`[` left half, `]` right half,
+  `\` maximise/restore) — all persistent in
+  `settings.txt`, with out-of-range values ignored, not
+  fatal (see docs/DESKTOP.md).
+- Built-in applications in the Start launcher's second
+  column: a text Editor (8192-byte cap, sanitises
+  non-text bytes on load), a system Monitor, a Network
+  manager (DHCP/ping buttons, clean no-device report),
+  a text-only Web browser (HTTP/HTTPS, 8192-byte body
+  buffer with reported truncation), and a BMP Viewer
+  (24-bit uncompressed, max 128×128, 128 KiB) — plus
+  Files → Open integration (.txt → Editor, .bmp →
+  Viewer). Calculator is unchanged; a new Console
+  package (`term.nxpkg`) provides a local echo console
+  that plainly cannot run programs.
+- A real bug fixed on the way: the HTTP/HTTPS clients
+  used to fail outright on any body bigger than the
+  buffer. They now truncate-and-drain and report it
+  (`web: truncated at 8192`, shell `http: N bytes
+  (truncated)`). Verified against a host server with a
+  20000-byte page.
+- Adversarial application testing passed: garbage
+  settings (theme=99, wallpaper=5, non-numeric values)
+  ignored at load, control/high bytes sanitised in the
+  editor, an oversize BMP refused before any pixel
+  read, empty files opening as 0 bytes.
+
 ## Status — v0.9.0 (Phase 9: networking + TLS 1.2 client)
 
 What actually works in v0.9.0, verified by booting the real ISO in QEMU and in Bochs 2.7:

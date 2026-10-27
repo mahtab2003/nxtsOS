@@ -1002,21 +1002,32 @@ int net_https_get(const char *host, u16 port, const char *path, char *buf, u32 m
     p = "\r\n\r\n"; while (*p) req[ri++] = *p++;
     req[ri] = 0;
     if (tls_send_app((const u8 *)req, (u32)ri) != 0) { net_tcp_close(); return -1; }
+    /* Same truncate-and-drain rule as net_http_get (v0.10.0). */
+    net_set_fetch_truncated(0);
     u8 tmp[1024];
-    u32 total = 0, header_end = 0, content_len = 0xFFFFFFFFu;
+    u32 total = 0, seen = 0, header_end = 0, content_len = 0xFFFFFFFFu;
+    int storing = 1;
     u32 start = timer_ticks;
     while (timer_ticks - start < 1000) {
         int n = tls_recv_app(tmp, sizeof(tmp));
         if (n < 0) break;
         if (n == 0) {
             if (header_end && content_len != 0xFFFFFFFFu &&
-                total >= header_end + content_len) break;
+                seen >= header_end + content_len) break;
             continue;
         }
-        if (total + (u32)n > max - 1) { net_tcp_close(); return -1; }
-        memcpy(buf + total, tmp, (u32)n);
-        total += (u32)n;
-        buf[total] = 0;
+        seen += (u32)n;
+        if (storing) {
+            if (total + (u32)n > max - 1) {
+                u32 room = max - 1 - total;
+                if (room) { memcpy(buf + total, tmp, room); total += room; buf[total] = 0; }
+                storing = 0; net_set_fetch_truncated(1);
+            } else {
+                memcpy(buf + total, tmp, (u32)n);
+                total += (u32)n;
+                buf[total] = 0;
+            }
+        }
         if (!header_end) {
             for (u32 i = 0; i + 3 < total; i++) {
                 if (buf[i] == '\r' && buf[i+1] == '\n' && buf[i+2] == '\r' && buf[i+3] == '\n') {
@@ -1044,7 +1055,7 @@ int net_https_get(const char *host, u16 port, const char *path, char *buf, u32 m
                 }
             }
         }
-        if (header_end && content_len != 0xFFFFFFFFu && total >= header_end + content_len) break;
+        if (header_end && content_len != 0xFFFFFFFFu && seen >= header_end + content_len) break;
     }
     net_tcp_close();
     if (!header_end) return -1;

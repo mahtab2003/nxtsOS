@@ -44,11 +44,18 @@ gcc -m32 -ffreestanding -O0 -Wall -Wextra -fno-stack-protector -fno-pic -fno-pie
     -c userland/guibad.c -o build/guibad_main.o
 gcc -m32 -no-pie -Wl,--build-id=none -T userland/linker.ld -nostdlib \
     -o build/guibad.elf build/user_start.o build/guibad_main.o
-ls -l build/hello.elf build/evil.elf build/slow.elf build/greet.elf build/hello2.elf build/calc.elf build/guibad.elf
+gcc -m32 -ffreestanding -O0 -Wall -Wextra -fno-stack-protector -fno-pic -fno-pie -no-pie -nostdlib \
+    -c userland/term.c -o build/term_main.o
+gcc -m32 -no-pie -Wl,--build-id=none -T userland/linker.ld -nostdlib \
+    -o build/term.elf build/user_start.o build/term_main.o
+ls -l build/hello.elf build/evil.elf build/slow.elf build/greet.elf build/hello2.elf build/calc.elf build/term.elf build/guibad.elf
 # Calculator package (Phase 8): installable from the shell with
 # `pkg install calc.nxpkg` (the .nxpkg must not be pre-seeded as a
 # plain calc.elf on the same disk, or the install is refused).
 python3 tools/mkpkg.py build/calc.nxpkg --name calc --version 1.0 --file calc.elf:build/calc.elf
+# Console package (Phase 10): same rule — do not pre-seed a plain
+# term.elf on a disk that also carries term.nxpkg.
+python3 tools/mkpkg.py build/term.nxpkg --name term --version 1.0 --file term.elf:build/term.elf
 echo "--- version check ---"
 # The kernel banner in main.c must match VERSION, or the bootloader
 # bug from v0.3.0 (stale version in a hand-edited string) recurs.
