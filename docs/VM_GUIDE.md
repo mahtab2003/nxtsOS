@@ -74,3 +74,29 @@ both were tested and cannot set 800x600x32 in Bochs 2.7 +
 SeaBIOS (see docs/GRAPHICS.md). After the shell prompt appears,
 click inside the Bochs window first, then type — Bochs SDL only
 delivers keys to the focused window.
+
+## Bochs on Android (v0.7.3, user-tested config, kernel fix)
+
+- The user's Android Bochs config that works for graphics:
+  Storage ata0-master disk `nxtsOS-disk.img`, ata0-slave CDROM
+  `nxtsOS.iso`, Boot cdrom; Hardware i440fx, 32 MB RAM,
+  VGA Card "Bochs VBE (PCI)", PCI Slot1 "pcivga". With that
+  config v0.7.2 already booted with "Framebuffer: 800x600,
+  pitch 3200, phys 0xC0000000 (Multiboot)" — graphics was NOT
+  the problem in the Android video, keyboard input was.
+- v0.7.3 fixes the kernel side (PS/2 controller init + drain,
+  see docs/GRAPHICS.md and releases/v0.7.3/MANIFEST.md). After
+  boot, the first shell prompt prints "Keyboard: startup
+  drained N byte(s)". Report that line with any new keyboard
+  failure: N > 0 means a lodged byte was drained by this build;
+  N = 0 and keys still dead means no bytes are reaching the
+  controller at all — the Android app is dropping its system
+  soft-keyboard input before Bochs, and no kernel change can
+  fix that. In that case try, in order: (1) the Bochs app's
+  own built-in virtual PC keyboard (app menu, if your app
+  provides one — it sends real PS/2 scancodes, unlike a system
+  IME which sends text), (2) a physical USB/Bluetooth keyboard
+  attached to the phone, (3) QEMU on a PC, where keyboard
+  input is tested and working.
+- Once you can type, run `gui` to start the window manager,
+  or `kbdstat` to see controller status and last scancode.
