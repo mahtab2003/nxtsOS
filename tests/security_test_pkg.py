@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Phase 6 adversarial security test.
 Boot A: install hello, then try badhash, badsize, badpath, badabs,
-selfdep, cycle a/b, need99, huge — all must be refused, hello must
-still run, and no evil files must appear in ls.
+selfdep, cycle a/b, need99, huge, unsigned, wrongkey, tampered —
+all must be refused, hello must still run, and no evil files must
+appear in ls. The manifest/blob attacks are signed with the vendor
+key (signature passes, specific check refuses); the signature
+attacks must fail for the signature reason.
 Boot B/C (tamper): install hello, terminate, flip one byte in
 hello.elf's data sector on disk, boot again, run hello.elf — it must
 be refused (hash mismatch), even though the ELF is otherwise intact.
@@ -65,6 +68,8 @@ ok_a, log_a = boot_and_run([
     "pkg install selfdep.nxpkg", "pkg install cyc_a.nxpkg",
     "pkg install cyc_b.nxpkg", "pkg install need99.nxpkg",
     "pkg install huge.nxpkg", "pkg install huge2.nxpkg",
+    "pkg install unsigned.nxpkg", "pkg install wrongkey.nxpkg",
+    "pkg install tampered.nxpkg",
     "pkg list", "ls", "run hello.elf",
 ])
 print("--- boot A log ---"); print(log_a)
@@ -74,6 +79,8 @@ checks_a = [
     ("package depends on itself", True),
     ("missing or conflicting dependency", True),
     ("cannot read package file", True),  # huge (over buffer cap)
+    ("package is not signed (legacy format)", True),  # unsigned
+    ("bad package signature", True),  # wrongkey + tampered
     ("hello 1.0", True),
     ("Hello from ELF", True),
     ("evil.elf", False),

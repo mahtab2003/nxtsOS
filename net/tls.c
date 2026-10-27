@@ -24,6 +24,7 @@
    - Only one connection at a time, like the TCP client. */
 #include "net.h"
 #include "bignum.h"
+#include "rsaverify.h"
 #include "../kernel/sha256.h"
 #include "../kernel/aes.h"
 #include "../drivers/pit.h"
@@ -300,10 +301,6 @@ static const u8 OID_SHA256_RSA[] = {0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x
 static const u8 OID_CN[] = {0x55, 0x04, 0x03};
 static const u8 OID_BC[] = {0x55, 0x1D, 0x13};
 static const u8 OID_SAN[] = {0x55, 0x1D, 0x11};
-/* SHA-256 DigestInfo prefix (PKCS#1 v1.5). */
-static const u8 SHA256_DER_PREFIX[] = {
-    0x30, 0x31, 0x30, 0x0D, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01,
-    0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20};
 
 /* ---------- Certificate ---------- */
 #define MAX_SAN_DNS 4
@@ -537,28 +534,19 @@ static int parse_cert(const u8 *buf, u32 len, struct cert_info *ci) {
 }
 /* Verify cert's RSA/SHA-256 signature with issuer_pubkey. */
 static int verify_signature(const struct cert_info *cert, const bn_t *mod, u32 exp) {
-    bn_t sig, em;
-    if (bn_from_be(&sig, cert->sig, cert->sig_len) != 0) return -1;
-    if (bn_modexp(&em, &sig, exp, mod) != 0) return -1;
-    /* Modulus length in bytes (round bit length up). */
+    /* Shared PKCS#1 v1.5 / SHA-256 verifier (net/rsaverify.c),
+       also used for package signatures. The modulus is passed
+       as the minimal big-endian form (bit length rounded up),
+       exactly as the old inline code computed k. */
     int bl = bn_bitlen(mod);
     u32 k = (u32)((bl + 7) / 8);
     if (k < 51 + 11) return -1; /* too small for DigestInfo + padding */
-    u8 em_bytes[256];
-    if (k > sizeof(em_bytes)) return -1;
-    if (bn_to_be(&em, em_bytes, k) != 0) return -1;
-    if (em_bytes[0] != 0x00 || em_bytes[1] != 0x01) return -1;
-    u32 i = 2;
-    while (i < k && em_bytes[i] == 0xFF) i++;
-    if (i - 2 < 8) return -1; /* padding too short */
-    if (i >= k || em_bytes[i] != 0x00) return -1;
-    i++;
-    if (k - i != sizeof(SHA256_DER_PREFIX) + 32) return -1;
-    if (memcmp(em_bytes + i, SHA256_DER_PREFIX, sizeof(SHA256_DER_PREFIX)) != 0) return -1;
-    u8 hash[32];
-    sha256_compute(cert->tbs, cert->tbs_len, hash);
-    if (memcmp(em_bytes + i + sizeof(SHA256_DER_PREFIX), hash, 32) != 0) return -1;
-    return 0;
+    u8 mod_bytes[256];
+    if (k > sizeof(mod_bytes)) return -1;
+    if (bn_to_be(mod, mod_bytes, k) != 0) return -1;
+    return rsa_verify_sha256(mod_bytes, k, exp,
+                             cert->sig, cert->sig_len,
+                             cert->tbs, cert->tbs_len);
 }
 static int ascii_equal_nocase(const char *a, const char *b) {
     while (*a && *b) {

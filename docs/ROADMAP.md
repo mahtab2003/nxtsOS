@@ -298,16 +298,24 @@ with test + security reports exists in `releases/`.
 
 ## Phase 11 — Hardening, update and verified releases (v1.0.0)
 
-- [ ] **Task 11.1 — Update mechanism**
+- [x] **Task 11.1 — Update mechanism**
   Details: system update via signed packages (Phase 6 verification),
   rollback to the previous known-good version on a failed update.
-- [ ] **Task 11.2 — Full adversarial review**
+  Done: RSA-2048 package signatures (NXPKG002), update bundles
+  (NXUPD001) with two-phase verify + snapshot + rollback, and a
+  signed remote package repository (NXREPO1) over HTTP.
+- [x] **Task 11.2 — Full adversarial review**
   Details: re-run every earlier security test suite against the final
   system, plus a fresh pass over every syscall, every driver, and every
   parser, as a third-party tester would. Fix, retest, record.
-- [ ] **Task 11.3 — v1.0.0 verified release**
+  Done: every suite green on the release line; fresh pass found and
+  fixed a TCP stale-segment bug and two integer wraparounds.
+- [x] **Task 11.3 — v1.0.0 verified release**
   Details: source + dist archives, SHA-256, VM guide, known issues,
   remote publishing only with explicit authorisation (private first).
+  Done: see releases/v1.0.0/. Remote publishing of the package
+  repository and the GitHub push remain pending explicit user
+  authorisation (private first, as required).
 
 - [x] **v0.3.1 — Bugfix on Phase 4 (user-reported):** GRUB menu now
   generated from `VERSION` at build time (v0.3.0's menu still said
@@ -455,6 +463,26 @@ with test + security reports exists in `releases/`.
   device in sandbox); improvement is argued from pixel
   counts, not a phone fps number.
 
-Current release: **v0.10.0 = Phase 10 modern desktop and
-applications**. Next: **Phase 11 hardening, update and verified
-releases (v1.0.0)**.
+Current release: **v1.0.0 = Phase 11 hardening, update and
+verified release**. Next: **post-v1.0.0 extension** (modern
+glitch-free UI pass, more desktop apps, more repository
+packages) per the standing direction below.
+
+## Standing direction (updated by the user 2026-10-27 — adds to
+all previous instructions, does not replace them)
+
+- The desktop UI must look like a NEW MODERN system, be
+  one of a kind (nxtsOS's own visual identity, not a
+  Windows/macOS clone), and be COMPLETE.
+- Prevent screen glitches: no tearing, flicker, or redraw
+  artifacts — verified with screendump/pixel comparisons,
+  fixed in the compositor, not papered over.
+- Build size and resource use may grow: larger builds and
+  somewhat heavier resource use are acceptable; UX wins
+  over bytes (the old minimise-at-all-costs constraint
+  is relaxed, not abandoned — no gratuitous waste).
+- Add utility and essential apps. Focus, in order: core
+  system, CLI features, packages, security, desktop apps.
+- This direction shapes v1.1.0+ planning after v1.0.0
+  ships; Phase 11 and all standing release/security
+  rules still hold.

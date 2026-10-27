@@ -267,7 +267,7 @@ static int execute(char *line) {
     int n = tokenize(line, tok, &rest);
     if (n == 0) return 0;
     if (strcmp(tok[0], "help") == 0) {
-        console_write("Commands: help, mem, ticks, clear, reboot, fs, ls, cat <file>, write <file> <text>, rm <file>, run <file>, runbg <file>, jobs, kill <pid>, lock, unlock <user>, whoami, logout, idle [minutes|off], fbinfo, kbdstat, pkg list, pkg install <file>, pkg remove <name>, pkg remove <name> force, sha256 <file>, aes-test, gui, guitest, cursortest, cliptest, desktop, desktopautotest, desktopsectest, desktop10test, desktopappstest, desktop10sec, desktopwebtest, desktopnonic, mouse, netinfo, dhcp, ping <ip>, dns <name>, http <host> <path>, https <host> <path>, nettest\n");
+        console_write("Commands: help, mem, ticks, clear, reboot, fs, ls, cat <file>, write <file> <text>, rm <file>, run <file>, runbg <file>, jobs, kill <pid>, lock, unlock <user>, whoami, logout, idle [minutes|off], fbinfo, kbdstat, pkg list, pkg install <file>, pkg install <name>, pkg remove <name>, pkg remove <name> force, pkg repo [url], pkg update, pkg fetch <name>, sysupdate <bundle>, sysrollback, sha256 <file>, aes-test, gui, guitest, cursortest, cliptest, desktop, desktopautotest, desktopsectest, desktop10test, desktopappstest, desktop10sec, desktopwebtest, desktopnonic, mouse, netinfo, dhcp, ping <ip>, dns <name>, http <host> <path>, https <host> <path>, nettest\n");
     } else if (strcmp(tok[0], "idle") == 0) {
         if (n < 2) {
             if (idle_timeout_minutes == 0) console_write("Idle timeout: disabled (never locks on idle)\n");
@@ -382,13 +382,33 @@ static int execute(char *line) {
         /* Note: tokenize() stops at 2 tokens and puts the rest in
            `rest`, so pkg subcommand arguments come from `rest`, not
            tok[2]/tok[3]. */
-        if (n < 2) { console_write("Usage: pkg list | pkg install <file> | pkg remove <name> [force]\n"); return 0; }
+        if (n < 2) { console_write("Usage: pkg list | pkg install <file> | pkg install <name> | pkg remove <name> [force] | pkg repo [url] | pkg update | pkg fetch <name>\n"); return 0; }
         if (strcmp(tok[1], "list") == 0) {
             pkg_list();
         } else if (strcmp(tok[1], "install") == 0) {
             if (!rest || rest[0] == 0) { console_write("Usage: pkg install <file>\n"); return 0; }
             if (session_uid != 0) { console_write("pkg install: root only\n"); return 0; }
-            pkg_install(rest);
+            /* Local file wins if it exists; a bare name without a
+               .nxpkg suffix is a repository install. */
+            if (fs_exists(rest)) pkg_install(rest);
+            else {
+                u32 rl = strlen(rest);
+                if (rl >= 6 && strcmp(rest + rl - 6, ".nxpkg") == 0) pkg_install(rest);
+                else pkg_repo_install(rest);
+            }
+        } else if (strcmp(tok[1], "repo") == 0) {
+            if (!rest || rest[0] == 0) pkg_repo_show();
+            else {
+                if (session_uid != 0) { console_write("pkg repo: root only\n"); return 0; }
+                pkg_repo_set(rest);
+            }
+        } else if (strcmp(tok[1], "update") == 0) {
+            if (session_uid != 0) { console_write("pkg update: root only\n"); return 0; }
+            pkg_repo_update();
+        } else if (strcmp(tok[1], "fetch") == 0) {
+            if (!rest || rest[0] == 0) { console_write("Usage: pkg fetch <name>\n"); return 0; }
+            if (session_uid != 0) { console_write("pkg fetch: root only\n"); return 0; }
+            pkg_repo_fetch(rest);
         } else if (strcmp(tok[1], "remove") == 0) {
             if (!rest || rest[0] == 0) { console_write("Usage: pkg remove <name> [force]\n"); return 0; }
             if (session_uid != 0) { console_write("pkg remove: root only\n"); return 0; }
@@ -403,7 +423,7 @@ static int execute(char *line) {
             }
             pkg_remove(rest, force);
         } else {
-            console_write("Usage: pkg list | pkg install <file> | pkg remove <name> [force]\n");
+            console_write("Usage: pkg list | pkg install <file> | pkg install <name> | pkg remove <name> [force] | pkg repo [url] | pkg update | pkg fetch <name>\n");
         }
     } else if (strcmp(tok[0], "gui") == 0) {
         wm_run();
@@ -517,6 +537,16 @@ static int execute(char *line) {
         else console_printf("https: %d bytes%s\n%s\n", bl, net_fetch_truncated() ? " (truncated)" : "", body);
     } else if (strcmp(tok[0], "nettest") == 0) {
         console_write(net_test_run() == 0 ? "nettest PASS\n" : "nettest FAIL\n");
+    } else if (strcmp(tok[0], "sysupdate") == 0) {
+        /* Top-level command: its one argument is tok[1], not rest
+           (rest holds text AFTER the second token — that is only
+           for two-level commands like `pkg install <file>`). */
+        if (n < 2) { console_write("Usage: sysupdate <bundle.nxupd>\n"); return 0; }
+        if (session_uid != 0) { console_write("sysupdate: root only\n"); return 0; }
+        pkg_sysupdate(tok[1]);
+    } else if (strcmp(tok[0], "sysrollback") == 0) {
+        if (session_uid != 0) { console_write("sysrollback: root only\n"); return 0; }
+        pkg_sysrollback();
     } else if (strcmp(tok[0], "mousepoll") == 0) {
         /* Poll the PS/2 controller for 5 seconds, logging any bytes
            that arrive, whether or not IRQ12 fired. Used to diagnose

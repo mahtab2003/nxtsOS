@@ -179,6 +179,13 @@ void tcp_rx(const u8 *ip, u32 ip_len, ip_t src) {
     }
     if (!ip_equal(src, tcp_peer)) return;
     if (tget16(tcp) != tcp_peer_port) return;
+    /* Destination port MUST match our local port: without this,
+       a delayed segment from a previous connection (same server
+       ip/port, e.g. its FIN arriving after we closed and
+       reconnected) was accepted into the new connection and
+       could truncate a download mid-stream. This was the
+       intermittent repo-fetch hash-mismatch flake. */
+    if (tget16(tcp + 2) != tcp_local_port) return;
     if (tcp_state == TCP_CLOSED) return;
     u8 flags = tcp[13];
     u32 seq = tget32(tcp + 4);
@@ -223,7 +230,12 @@ void tcp_rx(const u8 *ip, u32 ip_len, ip_t src) {
         }
     }
     if (flags & 0x01) { /* FIN */
-        if (seq + data_len == tcp_rcv_nxt || data_len == 0) {
+        /* Only a FIN at the exact receive position closes the
+           peer side. The old `|| data_len == 0` accepted ANY
+           bare FIN regardless of sequence number, so a stale
+           FIN from a previous connection could set
+           peer_closed mid-download and truncate it. */
+        if (seq + data_len == tcp_rcv_nxt) {
             tcp_rcv_nxt++;
             tcp_send_seg(0x10, 0, 0, 0);
             tcp_peer_closed = 1;
