@@ -101,7 +101,29 @@ delivers keys to the focused window.
 - Once you can type, run `gui` to start the window manager,
   or `kbdstat` to see controller status and last scancode.
 
-## GUI lag (v0.7.4)
+## Desktop shell (v0.8.0)
+
+- At the shell prompt, run `desktop` (not `gui`) for the
+  desktop shell: icons down the left, Start launcher, taskbar
+  with clock, notifications and quick settings, and a lock
+  screen. `gui` is still the older Phase 7 demo.
+- Calculator: build a disk that contains `calc.nxpkg` (it is
+  in the distribution zip), boot, log in as root, run
+  `pkg install calc.nxpkg`, then run `desktop` and click the
+  Calc icon (or Start → Calculator). Do NOT put a plain
+  `calc.elf` on the same disk, or the install is refused
+  ("file already exists on disk").
+- Settings: open Settings from an icon or the launcher, change
+  a value, click Save. Settings persist in `settings.txt` on
+  the disk. If you log in as a non-root user and settings.txt
+  is root-owned, Save is refused — that is the intended
+  permission check, not a bug.
+- Lock: click Start → Lock, or the Lock icon. In setup mode
+  (no users file) press Enter to unlock. With users, type the
+  session user's password. Three wrong passwords halt the
+  system, same as text login lockout.
+
+## GUI lag (v0.7.4, further improved in v0.8.0)
 
 - If the GUI feels laggy, the main cause in v0.7.0-0.7.3 was
   kernel redraw volume (full screen on every mouse move,
@@ -117,3 +139,17 @@ delivers keys to the focused window.
 - Bochs on a phone will always be slower than QEMU on a PC
   (interpreter vs dynamic translation). For the smoothest
   GUI, test on QEMU on a PC.
+- v0.8.0 adds true per-window clipping (only the dirty rect
+  of each window is redrawn, and the taskbar is skipped when
+  the dirty rect does not reach it) and raises the pending
+  redraw throttle from 30 Hz to 50 Hz. `cliptest` proves a
+  clipped redraw produces exactly the same pixels as a full
+  redraw. Residual lag you still feel in QEMU is mostly
+  host-side: QEMU's PS/2 mouse is relative, so the host
+  pointer and the guest cursor are both visible unless you
+  grab the mouse in QEMU (Ctrl+Alt+G), and QEMU's display
+  refresh means the guest cursor trails the host pointer by
+  roughly 30–50 ms regardless — the kernel cannot fix
+  host-side latency, and a USB tablet (absolute mouse) is
+  impossible without a USB driver, which nxtsOS does not
+  have yet.

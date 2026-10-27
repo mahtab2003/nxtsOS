@@ -266,7 +266,7 @@ static int execute(char *line) {
     int n = tokenize(line, tok, &rest);
     if (n == 0) return 0;
     if (strcmp(tok[0], "help") == 0) {
-        console_write("Commands: help, mem, ticks, clear, reboot, fs, ls, cat <file>, write <file> <text>, rm <file>, run <file>, runbg <file>, jobs, kill <pid>, lock, unlock <user>, whoami, logout, idle [minutes|off], fbinfo, kbdstat, pkg list, pkg install <file>, pkg remove <name>, pkg remove <name> force, sha256 <file>, aes-test, gui, guitest, cursortest, mouse\n");
+        console_write("Commands: help, mem, ticks, clear, reboot, fs, ls, cat <file>, write <file> <text>, rm <file>, run <file>, runbg <file>, jobs, kill <pid>, lock, unlock <user>, whoami, logout, idle [minutes|off], fbinfo, kbdstat, pkg list, pkg install <file>, pkg remove <name>, pkg remove <name> force, sha256 <file>, aes-test, gui, guitest, cursortest, cliptest, desktop, desktopautotest, desktopsectest, mouse\n");
     } else if (strcmp(tok[0], "idle") == 0) {
         if (n < 2) {
             if (idle_timeout_minutes == 0) console_write("Idle timeout: disabled (never locks on idle)\n");
@@ -412,6 +412,16 @@ static int execute(char *line) {
         wm_test();
     } else if (strcmp(tok[0], "cursortest") == 0) {
         wm_cursortest();
+    } else if (strcmp(tok[0], "cliptest") == 0) {
+        wm_cliptest();
+    } else if (strcmp(tok[0], "desktop") == 0) {
+        wm_desktop_run();
+    } else if (strcmp(tok[0], "desktopautotest") == 0) {
+        wm_desktop_autotest();
+    } else if (strcmp(tok[0], "desktopsectest") == 0) {
+        wm_desktop_sectest();
+    } else if (strcmp(tok[0], "desktopcalctest") == 0) {
+        wm_desktop_calctest();
     } else if (strcmp(tok[0], "mousepoll") == 0) {
         /* Poll the PS/2 controller for 5 seconds, logging any bytes
            that arrive, whether or not IRQ12 fired. Used to diagnose
@@ -600,3 +610,8 @@ void shell_run(void) {
         shell_loop();
     }
 }
+
+const char *shell_session_name(void) { return session_name; }
+u32 shell_session_uid(void) { return session_uid; }
+u32 shell_idle_minutes(void) { return idle_timeout_minutes; }
+void shell_set_idle_minutes(u32 m) { idle_timeout_minutes = m; }

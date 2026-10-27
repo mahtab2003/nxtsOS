@@ -175,3 +175,7 @@ int keyboard_getchar(void) {
    never consumed as the next session's username, password, or first
    command. */
 void keyboard_flush(void) { tail = head; }
+void keyboard_inject_char(char c) {
+    u32 next = (head + 1) % BUF_SIZE;
+    if (next != tail) { buf[head] = c; head = next; }
+}

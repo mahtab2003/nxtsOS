@@ -4,9 +4,35 @@ An original, ultra-lightweight desktop operating system, built from scratch.
 Not a Linux distribution, not a fork, not a re-themed desktop: nxtsOS boots
 its own kernel.
 
-## Status — v0.7.4 (Graphics + window manager, NOT a desktop shell yet)
+## Status — v0.8.0 (Phase 8: first desktop shell + Calculator package)
 
-What actually works in v0.7.4, verified by booting the real ISO in QEMU and in Bochs 2.7:
+What actually works in v0.8.0, verified by booting the real ISO in QEMU and in Bochs 2.7:
+
+- Everything from v0.7.4, plus a real desktop shell: run `desktop`
+  at the shell prompt for icons (Settings, Files, Calculator,
+  About, Terminal, Lock), a Start-style launcher, a taskbar with
+  a CMOS-RTC clock, session name, notification bell and quick
+  settings, a notification centre, and a lock screen backed by
+  Phase 5 sessions (wrong passwords fail and the lock stays up;
+  in setup mode with no users file, Enter unlocks).
+- Settings window with search, and persistent `settings.txt` on
+  disk (idle timeout, mouse speed, clock format, desktop icons);
+  a non-root user cannot save over a root-owned settings file —
+  the save is refused with "Save failed: permission denied".
+- GUI syscalls (9–13: open/rect/text/event/close) for user
+  windows, and the first GUI application as a real package:
+  Calculator (`calc.nxpkg`, install with `pkg install
+  calc.nxpkg`, then open it from the desktop Calc icon or the
+  launcher). Calculator has a fixed keypad layout, + − × ÷ with
+  division by repeated subtraction, and click confirmation on
+  mouse release over the same key.
+- Further lag work on top of v0.7.4: true per-window clipping
+  (a dirty redraw now draws only the dirty rect of each
+  window, and skips the taskbar when the dirty rect does not
+  reach it), pending-redraw throttle 30 Hz → 50 Hz, and a
+  `cliptest` command proving a clipped redraw produces exactly
+  the same pixels as a full redraw. `gui` remains the Phase 7
+  demo, unchanged; `desktop` is the new shell.
 
 - Multiboot boot path (GRUB), 32-bit x86 kernel written from scratch.
   The GRUB menu version is now generated from the `VERSION` file at
@@ -94,7 +120,7 @@ Full instructions, tested configuration, and known issues:
 `docs/VM_GUIDE.md`, `docs/BUILD_AND_TEST.md`, `releases/v0.3.0/TEST_REPORT.md`.
 
 **v0.1.0 warning:** v0.1.0 rebooted in a loop in QEMU (wrong GDT selectors
-— see `releases/v0.1.1/TEST_REPORT.md`). Do not use v0.1.0; use v0.7.4.
+— see `releases/v0.1.1/TEST_REPORT.md`). Do not use v0.1.0; use v0.8.0.
 QEMU tests: `tests/security_test_gui.py`, `tests/qemu_test_enc.py`, `tests/security_test_enc.py`, plus package, Phase 5, base, and storage regressions — all PASS.
 
 ## Project layout

@@ -4,6 +4,7 @@
 void keyboard_init(void);
 void keyboard_irq_handler(void);
 int  keyboard_getchar(void); /* -1 if no key waiting */
+void keyboard_inject_char(char c); /* test-only: push an ASCII char into the buffer */
 void keyboard_flush(void); /* discard buffered keys (login/lock/logout) */
 void keyboard_poll(void); /* pick up a pending byte without an IRQ */
 u32  keyboard_init_drained(void); /* bytes drained at startup (v0.7.3) */

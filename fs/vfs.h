@@ -12,6 +12,7 @@ int  fs_mount(void);          /* 0 ok, -1 no disk, -2 bad filesystem */
 int  fs_mounted(void);
 void fs_status(void);         /* print mount status to console */
 int  fs_list(void);
+int  fs_enum_as(u32 uid, char names[][32], u32 sizes[], int max); /* fill names/sizes for readable files, return count */
 int  fs_list_as(u32 uid);
 int  fs_read(const char *name, u8 *buf, u32 buf_size, u32 *out_size);
 int  fs_read_as(const char *name, u8 *buf, u32 buf_size, u32 *out_size, u32 uid);

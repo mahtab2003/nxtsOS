@@ -87,6 +87,11 @@ void proc_bg_tick(void) {
         }
     }
 }
+int proc_bg_exists(u32 pid) {
+    for (int i = 0; i < MAX_BG; i++)
+        if (bg_jobs[i].used && bg_jobs[i].p.pid == pid) return 1;
+    return 0;
+}
 int proc_bg_list(void) {
     int n = 0;
     for (int i = 0; i < MAX_BG; i++) {
