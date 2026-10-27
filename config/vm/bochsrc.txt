@@ -23,7 +23,7 @@
 # remaining cause to check.
 romimage: file=/usr/share/seabios/bios.bin
 vgaromimage: file=/usr/share/seabios/vgabios-stdvga.bin
-vga: extension=vbe, update_freq=5
+vga: extension=vbe, update_freq=30
 cpu: count=1, ips=50000000
 memory: guest=32, host=32
 ata0-master: type=cdrom, path=nxtsOS.iso, status=inserted

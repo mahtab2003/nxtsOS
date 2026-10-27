@@ -159,9 +159,17 @@ static void fill_clip(s32 x, s32 y, s32 w, s32 h, u32 colour,
     if (x1 > (s32)width) x1 = (s32)width;
     if (y1 > (s32)height) y1 = (s32)height;
     if (x0 >= x1 || y0 >= y1) return;
-    for (s32 yy = y0; yy < y1; yy++)
-        for (s32 xx = x0; xx < x1; xx++)
-            fb[(u32)yy * (pitch / 4) + (u32)xx] = colour;
+    /* v0.7.4: row-pointer fill. The old version indexed
+       fb[yy * (pitch/4) + xx] for every pixel, which is a multiply
+       per pixel in the emulated CPU; a row pointer turns the inner
+       loop into a plain sequential store, which the compiler can
+       turn into wide stores. This is the single biggest per-pixel
+       win for full-screen fills (background = 480,000 pixels). */
+    u32 row_stride = pitch / 4;
+    for (s32 yy = y0; yy < y1; yy++) {
+        u32 *row = fb + (u32)yy * row_stride + (u32)x0;
+        for (s32 xx = x0; xx < x1; xx++) *row++ = colour;
+    }
 }
 
 void fb_fill_rect(s32 x, s32 y, s32 w, s32 h, u32 colour) {
@@ -175,11 +183,16 @@ void fb_fill_rect_clip(s32 x, s32 y, s32 w, s32 h, u32 colour,
 void fb_draw_char(s32 x, s32 y, char ch, u32 fg, u32 bg) {
     if (!ready) return;
     const u8 *glyph = font8x16[(u8)ch];
+    u32 row_stride = pitch / 4;
     for (int row = 0; row < 16; row++) {
+        s32 yy = y + row;
+        if (yy < 0 || yy >= (s32)height) continue;
         u8 bits = glyph[row];
+        u32 *rowp = fb + (u32)yy * row_stride;
         for (int col = 0; col < 8; col++) {
-            u32 colour = (bits & (0x80 >> col)) ? fg : bg;
-            fb_putpixel(x + col, y + row, colour);
+            s32 xx = x + col;
+            if (xx < 0 || xx >= (s32)width) continue;
+            rowp[xx] = (bits & (0x80 >> col)) ? fg : bg;
         }
     }
 }
@@ -196,17 +209,24 @@ void fb_draw_text_clip(s32 x, s32 y, const char *s, u32 fg, u32 bg,
     if (cx1 > (s32)width) cx1 = (s32)width;
     if (cy1 > (s32)height) cy1 = (s32)height;
     s32 cur_x = x;
+    u32 row_stride = pitch / 4;
     for (const char *p = s; *p; p++) {
-        /* Draw the glyph, but only pixels inside the clip rect. */
+        /* Clip the glyph's x range once, then draw the row
+           without a per-pixel bounds check (v0.7.4: the old
+           version checked xx/cx0/cx1 for every one of the
+           128 pixels of every glyph, on every full redraw). */
+        s32 gx0 = cur_x, gx1 = cur_x + 8;
+        if (gx0 < cx0) gx0 = cx0;
+        if (gx1 > cx1) gx1 = cx1;
         const u8 *glyph = font8x16[(u8)*p];
         for (int row = 0; row < 16; row++) {
             s32 yy = y + row;
             if (yy < cy0 || yy >= cy1) continue;
             u8 bits = glyph[row];
-            for (int col = 0; col < 8; col++) {
-                s32 xx = cur_x + col;
-                if (xx < cx0 || xx >= cx1) continue;
-                fb[(u32)yy * (pitch / 4) + (u32)xx] = (bits & (0x80 >> col)) ? fg : bg;
+            u32 *rowp = fb + (u32)yy * row_stride;
+            for (s32 xx = gx0; xx < gx1; xx++) {
+                int col = (int)(xx - cur_x);
+                rowp[xx] = (bits & (0x80 >> col)) ? fg : bg;
             }
         }
         cur_x += 8;

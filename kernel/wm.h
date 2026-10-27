@@ -15,5 +15,6 @@
 int wm_run(void);
 int wm_autotest(void);
 int wm_test(void);
+int wm_cursortest(void);
 int wm_count(void);
 #endif
