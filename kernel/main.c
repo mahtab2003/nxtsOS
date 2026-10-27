@@ -3,6 +3,7 @@
 #include "panic.h"
 #include "shell.h"
 #include "../mm/pmm.h"
+#include "../drivers/gdt.h"
 #include "../drivers/idt.h"
 #include "../drivers/pic.h"
 #include "../drivers/pit.h"
@@ -22,7 +23,7 @@ void kmain(u32 magic, u32 mbi_addr) {
     serial_init();
     console_init();
     console_write("nxtsOS kernel starting\n");
-    console_write("nxtsOS v0.1.0 - original kernel, Multiboot boot\n");
+    console_write("nxtsOS v0.1.1 - original kernel, Multiboot boot\n");
     if (magic != 0x2BADB002) panic("bad Multiboot magic");
     struct multiboot_info *mbi = (struct multiboot_info *)mbi_addr;
     console_printf("Multiboot: mem_lower=%uK mem_upper=%uK mmap_len=%u\n",
@@ -31,6 +32,8 @@ void kmain(u32 magic, u32 mbi_addr) {
              (u32)&__kernel_start, (u32)&__kernel_end);
     console_printf("PMM: total=%u frames free=%u frames\n",
                    pmm_total_frames(), pmm_free_frames());
+    gdt_init();
+    console_write("GDT installed (code 0x08, data 0x10)\n");
     idt_init();
     pic_init();
     pit_init();

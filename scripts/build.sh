@@ -9,9 +9,10 @@ CFLAGS="-m32 -ffreestanding -O2 -Wall -Wextra -fno-stack-protector -fno-pic -fno
 echo "--- compiling ---"
 gcc $CFLAGS -c boot/boot.S -o build/boot.o
 gcc $CFLAGS -c drivers/isr.S -o build/isr.o
+gcc $CFLAGS -c drivers/gdt.S -o build/gdt_asm.o
 for f in kernel/util.c kernel/console.c kernel/panic.c kernel/shell.c kernel/main.c \
          drivers/serial.c drivers/idt.c drivers/pic.c drivers/pit.c drivers/keyboard.c \
-         mm/pmm.c; do
+         drivers/gdt.c mm/pmm.c; do
     o="build/$(basename "$f" .c).o"
     echo "cc $f -> $o"
     gcc $CFLAGS -c "$f" -o "$o"
@@ -20,9 +21,9 @@ echo "--- linking ---"
 # No -lgcc: the host has no 32-bit libgcc, and the kernel avoids runtime
 # division calls (see util.c), so it links freestanding without it.
 gcc -m32 -no-pie -Wl,--build-id=none -T boot/linker.ld -nostdlib -o build/nxtsOS.bin \
-    build/boot.o build/isr.o build/util.o build/console.o build/panic.o \
+    build/boot.o build/isr.o build/gdt_asm.o build/util.o build/console.o build/panic.o \
     build/shell.o build/main.o build/serial.o build/idt.o build/pic.o \
-    build/pit.o build/keyboard.o build/pmm.o
+    build/pit.o build/keyboard.o build/gdt.o build/pmm.o
 ls -l build/nxtsOS.bin
 if command -v grub-file >/dev/null 2>&1; then
     grub-file --is-x86-multiboot build/nxtsOS.bin && echo "grub-file: multiboot OK"

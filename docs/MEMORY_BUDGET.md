@@ -8,10 +8,10 @@ Targets (development targets, not guarantees):
 
 ## Measured in v0.1.0
 
-- Simulated RAM in the Unicorn boot test: 128 MB (Multiboot map supplied
-  by the harness). Kernel-reported PMM: 32768 frames total, 32501 free,
-  267 used (~1.04 MiB: first MiB + kernel image). QEMU RAM measurements
-  are NOT TESTED yet.
+- QEMU (v0.1.1, kernel-reported PMM): 128 MB → 32736 frames total,
+  32469 free, 267 used (1068 KiB); 64 MB → 16352 frames total, 16085
+  free, 267 used. Unicorn (simulated 128 MB): 32768 total / 32501 free
+  (difference is the real GRUB memory map, which reserves more regions).
 - Kernel binary (`build/nxtsOS.bin`): see the release manifest for its
   exact size; it is a few tens of KiB.
 - Kernel stack: 16 KiB, statically reserved.

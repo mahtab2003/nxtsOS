@@ -25,6 +25,15 @@ BIOS -> GRUB (grub-mkrescue ISO, El Torito) -> Multiboot header in boot/boot.S
 The Multiboot magic (`0x2BADB002`) is checked; a wrong magic panics with
 a message instead of silently continuing.
 
+## GDT: the kernel installs its own
+
+GRUB's GDT uses code selector 0x10 and data selector 0x18. v0.1.0 assumed
+0x08/0x10, so the first timer interrupt triple-faulted and QEMU reset in
+a loop. Since v0.1.1, `gdt_init()` (called before `idt_init()`) installs
+nxtsOS's own GDT — null, code 0x08, data 0x10 — and reloads CS/DS/SS, so
+the IDT gates (0x08) and ISR stubs (DS 0x10) are always correct no
+matter what GDT the bootloader left behind.
+
 ## v0.1.0 components
 
 | Component | File(s) | What it does |

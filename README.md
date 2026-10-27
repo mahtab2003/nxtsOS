@@ -4,10 +4,9 @@ An original, ultra-lightweight desktop operating system, built from scratch.
 Not a Linux distribution, not a fork, not a re-themed desktop: nxtsOS boots
 its own kernel.
 
-## Status — v0.1.0 (boot milestone, NOT a full desktop)
+## Status — v0.1.1 (QEMU-verified boot milestone, NOT a full desktop)
 
-What actually works in v0.1.0, verified by booting the real kernel binary
-under the Unicorn CPU emulator (QEMU test pending — see below):
+What actually works in v0.1.1, verified by booting the real ISO in QEMU:
 
 - Multiboot boot path (GRUB), 32-bit x86 kernel written from scratch
 - VGA text console + serial (COM1) diagnostic log
@@ -25,7 +24,7 @@ What is NOT in v0.1.0 — do not mistake this release for it:
 - No installer
 
 Those are Phases 3–9 in `docs/ROADMAP.md`. Each phase lands only when it
-boots and is tested in QEMU the same way v0.1.0 was.
+boots and is tested in QEMU the same way v0.1.1 was.
 
 ## Quick start (QEMU)
 
@@ -41,13 +40,9 @@ QEMU window (or close it) to stop the VM.
 Full instructions, tested configuration, and known issues:
 `docs/VM_GUIDE.md`, `docs/BUILD_AND_TEST.md`, `releases/v0.1.0/TEST_REPORT.md`.
 
-**QEMU status:** the ISO builds and `grub-file` confirms it is a valid
-Multiboot image, but a QEMU boot run has NOT completed in this session yet:
-the QEMU package download through this sandbox's proxy is very slow
-(~tens of KB/s) and was still downloading at packaging time. The QEMU test
-(`scripts/test_boot.sh`) is ready and must be run before anyone calls this
-release QEMU-verified. The Unicorn boot test is NOT a substitute for it,
-and is labelled as such in the test report.
+**v0.1.0 warning:** v0.1.0 rebooted in a loop in QEMU (wrong GDT selectors
+— see `releases/v0.1.1/TEST_REPORT.md`). Do not use v0.1.0; use v0.1.1.
+QEMU test: `./scripts/test_boot.sh` — PASS at 128 MB and 64 MB.
 
 ## Project layout
 

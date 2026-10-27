@@ -4,12 +4,9 @@
 
 - Emulator: QEMU (qemu-system-x86_64), machine `pc` (i440FX), CPU default
 - RAM to test: **128 MB** (64 MB as a secondary run)
-- **QEMU test status: NOT TESTED yet** — see `releases/v0.1.0/TEST_REPORT.md`.
-  What HAS been tested is the kernel binary under Unicorn (CPU emulation,
-  fake Multiboot info, serial capture): boot to the shell prompt, PMM
-  counts for 128 MiB, and interrupt setup code executed without fault.
-  Unicorn does not emulate PIC/PIT/keyboard hardware, so timer ticks and
-  keyboard input are NOT verified by that run — they need the QEMU run.
+- **QEMU test status (v0.1.1): PASS** — see `releases/v0.1.1/TEST_REPORT.md`.
+  Booted at 128 MB and 64 MB, monitor-typed `help`/`mem`/`ticks` all work.
+  v0.1.0 FAILED this test (reboot loop); v0.1.1 fixes it with its own GDT.
 - Display: VGA text mode 80x25 (no graphics mode yet)
 - Input: PS/2 keyboard (QEMU default)
 - Storage: none required for v0.1.0 (ISO boots from CD; no disk, no persistence)
