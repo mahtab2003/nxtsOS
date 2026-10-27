@@ -25,11 +25,36 @@ def wait_for(path, pred, timeout):
     return False
 
 KEYMAP = {" ": "spc", ".": "dot", "-": "minus", "_": "shift-minus"}
-def send_text(s, sock):
-    for ch in s:
-        sock.sendall(f"sendkey {KEYMAP.get(ch, ch)}\n".encode())
-        time.sleep(0.15)
-    sock.sendall(b"sendkey ret\n")
+def send_text(s, sock, verify_serial=None):
+    # QEMU monitor sendkey occasionally delivers a key twice, which
+    # garbles a shell command into a valid-looking but wrong one
+    # (e.g. "run badmagic..elf" never produces the expected
+    # "run: cannot run badmagic.elf" marker). When verify_serial
+    # is given, verify the shell's echo of the line and retype
+    # once on mismatch; a doubled character never yields a
+    # different valid command here, so the garbled run was a
+    # harmless no-op. Login typing (usernames/passwords) must
+    # NOT use verification: passwords do not echo.
+    def type_cmd(t):
+        for ch in t:
+            sock.sendall(f"sendkey {KEYMAP.get(ch, ch)}\n".encode())
+            time.sleep(0.15)
+        sock.sendall(b"sendkey ret\n")
+    if verify_serial is None:
+        type_cmd(s); time.sleep(0.3); return
+    before = len(log_text(verify_serial))
+    type_cmd(s); time.sleep(0.3)
+    for _ in range(150):
+        fresh = log_text(verify_serial)[before:]
+        if f"root@nxts> {s}" in fresh: return
+        if fresh.count("root@nxts> ") >= 1: break
+        time.sleep(0.1)
+    if f"root@nxts> {s}" not in log_text(verify_serial)[before:]:
+        before2 = len(log_text(verify_serial))
+        type_cmd(s); time.sleep(0.3)
+        for _ in range(150):
+            if f"root@nxts> {s}" in log_text(verify_serial)[before2:]: break
+            time.sleep(0.1)
     time.sleep(0.3)
 
 def boot(disk, ram="128"):
@@ -74,9 +99,9 @@ try:
     ok = ok and wait_for(serial, lambda t: "root@nxts> " in t, 10)
     for name in ["badmagic.elf", "badtrunc.elf", "badphnum.elf", "badoffset.elf",
                  "badkaddr.elf", "badstack.elf", "badentry.elf", "badmemsz.elf"]:
-        send_text(f"run {name}", s); time.sleep(1)
-    send_text("run evil.elf", s); time.sleep(2)
-    send_text("run hello.elf", s); time.sleep(2)
+        send_text(f"run {name}", s, verify_serial=serial); time.sleep(1)
+    send_text("run evil.elf", s, verify_serial=serial); time.sleep(2)
+    send_text("run hello.elf", s, verify_serial=serial); time.sleep(2)
     time.sleep(1)
 finally:
     stop(qemu, s)

@@ -1176,7 +1176,7 @@ static void desk_draw_about_content(int idx, s32 dx, s32 dy, s32 dw, s32 dh) {
     struct window *wn = &wins[idx];
     s32 x = wn->x, y = wn->y;
     s32 cx = x + 1, cy = y + TITLE_H + 1, cw = wn->w - 2, ch = wn->h - TITLE_H - 2;
-    draw_text2(x + 10, y + 32, "nxtsOS v0.10.0", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    draw_text2(x + 10, y + 32, "nxtsOS v1.0.0", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
     draw_text2(x + 10, y + 52, "Original kernel, Multiboot, 32-bit x86.", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
     draw_text2(x + 10, y + 72, "Not a Linux distribution or fork.", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
     char buf[64];

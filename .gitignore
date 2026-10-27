@@ -1,4 +1,6 @@
 build/
+kernel/vendor_pubkey.h
+AUTONOMOUS.md
 *.o
 *.bin
 *.iso

@@ -67,9 +67,25 @@ static int valid_entry(struct dir_entry *e) {
 static int is_system_file(const char *name) {
     /* fails.txt holds persistent per-user failed-login counts (v0.4.1);
        like users.txt/audit.log it must never be created or written by
-       a non-root user, or the brute-force lockout could be cleared. */
-    return strcmp(name, "users.txt") == 0 || strcmp(name, "audit.log") == 0
-        || strcmp(name, "fails.txt") == 0 || strcmp(name, "packages.txt") == 0;
+       a non-root user, or the brute-force lockout could be cleared.
+       pubkeys.txt (Phase 11 keyring) joins the list: otherwise a
+       non-root user could create it before root does, and a later
+       root install would trust the attacker's key. */
+    if (strcmp(name, "users.txt") == 0 || strcmp(name, "audit.log") == 0
+        || strcmp(name, "fails.txt") == 0 || strcmp(name, "packages.txt") == 0
+        || strcmp(name, "pubkeys.txt") == 0
+        || strcmp(name, "rollback.txt") == 0 || strcmp(name, "rb_packages.txt") == 0
+        || strcmp(name, "repo.txt") == 0
+        || strcmp(name, "repo_index.txt") == 0 || strcmp(name, "repo_index.sig") == 0)
+        return 1;
+    /* Rollback backups rb0..rb63 (Phase 11 snapshot): same rule —
+       a non-root user must not pre-create one, or a later root
+       snapshot could be tricked into trusting attacker content. */
+    if (name[0] == 'r' && name[1] == 'b' && name[2] >= '0' && name[2] <= '9') {
+        if (name[3] == 0) return 1;
+        if (name[3] >= '0' && name[3] <= '9' && name[4] == 0) return 1;
+    }
+    return 0;
 }
 static int can_read_entry(struct dir_entry *e, u32 uid) {
     if (uid == 0) return 1;

@@ -49,13 +49,25 @@ gcc -m32 -ffreestanding -O0 -Wall -Wextra -fno-stack-protector -fno-pic -fno-pie
 gcc -m32 -no-pie -Wl,--build-id=none -T userland/linker.ld -nostdlib \
     -o build/term.elf build/user_start.o build/term_main.o
 ls -l build/hello.elf build/evil.elf build/slow.elf build/greet.elf build/hello2.elf build/calc.elf build/term.elf build/guibad.elf
+# Vendor signing key (Phase 11): generated ONCE and kept in build/
+# (git-ignored, never archived). Deleting it creates a new keypair,
+# which invalidates every previously signed package — the kernel
+# and the packages must always use the same keypair.
+if [ ! -f build/signing.key ]; then
+    echo "--- generating vendor signing key (kept in build/, never shipped) ---"
+    openssl genrsa -out build/signing.key 2048
+    chmod 600 build/signing.key
+fi
 # Calculator package (Phase 8): installable from the shell with
 # `pkg install calc.nxpkg` (the .nxpkg must not be pre-seeded as a
 # plain calc.elf on the same disk, or the install is refused).
-python3 tools/mkpkg.py build/calc.nxpkg --name calc --version 1.0 --file calc.elf:build/calc.elf
+python3 tools/mkpkg.py build/calc.nxpkg --name calc --version 1.0 --file calc.elf:build/calc.elf --sign-key build/signing.key
 # Console package (Phase 10): same rule — do not pre-seed a plain
 # term.elf on a disk that also carries term.nxpkg.
-python3 tools/mkpkg.py build/term.nxpkg --name term --version 1.0 --file term.elf:build/term.elf
+python3 tools/mkpkg.py build/term.nxpkg --name term --version 1.0 --file term.elf:build/term.elf --sign-key build/signing.key
+# Embed the vendor public key into the kernel (regenerated every
+# build from the same key, so it can never drift from the signer).
+python3 tools/genvendorpub.py build/signing.key kernel/vendor_pubkey.h
 echo "--- version check ---"
 # The kernel banner in main.c must match VERSION, or the bootloader
 # bug from v0.3.0 (stale version in a hand-edited string) recurs.
@@ -73,7 +85,7 @@ for f in kernel/util.c kernel/console.c kernel/panic.c kernel/shell.c kernel/mai
          kernel/proc.c kernel/syscall.c kernel/users.c kernel/elf.c kernel/sha256.c kernel/pkg.c kernel/aes.c kernel/enc.c kernel/fb.c kernel/wm.c \
          drivers/serial.c drivers/idt.c drivers/pic.c drivers/pit.c drivers/keyboard.c drivers/mouse.c \
          drivers/gdt.c drivers/ata.c fs/nxtsfs.c mm/pmm.c mm/vmm.c \
-         net/e1000.c net/net.c net/tcp.c net/tls.c net/nettest.c net/bignum.c; do
+         net/e1000.c net/net.c net/tcp.c net/tls.c net/nettest.c net/bignum.c net/rsaverify.c; do
     o="build/$(basename "$f" .c).o"
     echo "cc $f -> $o"
     gcc $CFLAGS -c "$f" -o "$o"
@@ -86,7 +98,7 @@ gcc -m32 -no-pie -Wl,--build-id=none -T boot/linker.ld -nostdlib -o build/nxtsOS
     build/user_blob.o build/util.o build/console.o build/panic.o \
     build/shell.o build/main.o build/proc.o build/syscall.o build/users.o build/elf.o build/sha256.o build/pkg.o build/aes.o build/enc.o build/fb.o build/wm.o build/serial.o build/idt.o \
     build/pic.o build/pit.o build/keyboard.o build/mouse.o build/gdt.o build/ata.o build/nxtsfs.o build/pmm.o build/vmm.o \
-    build/e1000.o build/net.o build/tcp.o build/tls.o build/nettest.o build/bignum.o
+    build/e1000.o build/net.o build/tcp.o build/tls.o build/nettest.o build/bignum.o build/rsaverify.o
 ls -l build/nxtsOS.bin
 if command -v grub-file >/dev/null 2>&1; then
     grub-file --is-x86-multiboot build/nxtsOS.bin && echo "grub-file: multiboot OK"

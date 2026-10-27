@@ -4,6 +4,60 @@ An original, ultra-lightweight desktop operating system, built from scratch.
 Not a Linux distribution, not a fork, not a re-themed desktop: nxtsOS boots
 its own kernel.
 
+## Status — v1.0.0 (Phase 11: hardening, update, verified release)
+
+What actually works in v1.0.0, verified by booting the real ISO in QEMU and in Bochs 2.7:
+
+- Everything from v0.10.0, plus RSA-2048 package signatures:
+  every install now requires a valid signature over the
+  manifest (vendor key compiled into the kernel, or a
+  root-owned keyring in `pubkeys.txt`); legacy unsigned
+  packages and wrong-key or tampered packages are
+  refused, with the tamper case proven by a byte-flip
+  test (see docs/PACKAGES.md). The signing key itself
+  never ships in any archive; if it is lost, old
+  signed packages become uninstallable and everything
+  must be re-signed.
+- System updates with rollback: `sysupdate <bundle>`
+  verifies every package, dependency, reverse
+  dependency, file conflict, and dependency cycle
+  BEFORE writing anything, snapshots the files and
+  registry it will touch, then commits in dependency
+  order; any failure restores the snapshot, and
+  `sysrollback` returns to the previous version
+  (one generation only).
+- A remote package repository over plain HTTP, by
+  design: the kernel TLS client has no public CA
+  trust store, so signatures — not transport — carry
+  authenticity, like apt's signed Release files.
+  `pkg repo`, `pkg update` (signed index, anti-
+  rollback against the stored version, stored index
+  re-verified on every use), `pkg fetch`, and
+  `pkg install <name>` from the repository. The
+  public hosting publish is still pending the user's
+  explicit approval; the mechanism itself is verified
+  against a local repository.
+- A full adversarial review (Phase 11.2): every
+  earlier security suite re-run green, plus a fresh
+  pass over syscalls, drivers, and parsers. Two real
+  bugs found and fixed on the way: the TCP stack
+  accepted stale segments from previous connections
+  (no destination-port check, any bare FIN counted
+  as a close), which intermittently truncated a
+  download; and two integer wraparounds (repository
+  index version, repository URL port) that now refuse
+  instead of wrapping. See
+  releases/v1.0.0/SECURITY_REPORT.md.
+- Honest limits, unchanged from before and still
+  stated plainly: no graphical boot login, no UEFI,
+  no installer, no CA trust store (TOFU roots only),
+  no cryptographic RNG (timer-seeded xorshift),
+  no user-mode socket API, no package revocation
+  list, one rollback generation, 32-file / 16 MiB
+  disk caps, and real mouse movement still
+  untested in QEMU (scripted injection only).
+  VirtualBox and real hardware are NOT TESTED.
+
 ## Status — v0.10.0 (Phase 10: modern desktop and applications)
 
 What actually works in v0.10.0, verified by booting the real ISO in QEMU and in Bochs 2.7:
