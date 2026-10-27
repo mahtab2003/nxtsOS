@@ -13,6 +13,7 @@
 #include "../drivers/pit.h"
 #include "../drivers/keyboard.h"
 #include "../fs/vfs.h"
+#include "../net/net.h"
 
 static char session_name[32];
 static u32 session_uid = 0;
@@ -266,7 +267,7 @@ static int execute(char *line) {
     int n = tokenize(line, tok, &rest);
     if (n == 0) return 0;
     if (strcmp(tok[0], "help") == 0) {
-        console_write("Commands: help, mem, ticks, clear, reboot, fs, ls, cat <file>, write <file> <text>, rm <file>, run <file>, runbg <file>, jobs, kill <pid>, lock, unlock <user>, whoami, logout, idle [minutes|off], fbinfo, kbdstat, pkg list, pkg install <file>, pkg remove <name>, pkg remove <name> force, sha256 <file>, aes-test, gui, guitest, cursortest, cliptest, desktop, desktopautotest, desktopsectest, mouse\n");
+        console_write("Commands: help, mem, ticks, clear, reboot, fs, ls, cat <file>, write <file> <text>, rm <file>, run <file>, runbg <file>, jobs, kill <pid>, lock, unlock <user>, whoami, logout, idle [minutes|off], fbinfo, kbdstat, pkg list, pkg install <file>, pkg remove <name>, pkg remove <name> force, sha256 <file>, aes-test, gui, guitest, cursortest, cliptest, desktop, desktopautotest, desktopsectest, mouse, netinfo, dhcp, ping <ip>, dns <name>, http <host> <path>, https <host> <path>, nettest\n");
     } else if (strcmp(tok[0], "idle") == 0) {
         if (n < 2) {
             if (idle_timeout_minutes == 0) console_write("Idle timeout: disabled (never locks on idle)\n");
@@ -422,6 +423,90 @@ static int execute(char *line) {
         wm_desktop_sectest();
     } else if (strcmp(tok[0], "desktopcalctest") == 0) {
         wm_desktop_calctest();
+    } else if (strcmp(tok[0], "netinfo") == 0) {
+        if (!net_present()) { console_write("net: no NIC\n"); return 0; }
+        mac_t m; net_mac(&m);
+        console_printf("net: MAC %x:%x:%x:%x:%x:%x rx=%u tx=%u drops=%u\n",
+                       m.b[0], m.b[1], m.b[2], m.b[3], m.b[4], m.b[5],
+                       net_rx_count(), net_tx_count(), net_drop_count());
+        if (net_ip_configured()) {
+            ip_t a, g, d, nm;
+            net_ip_addr(&a); net_ip_gateway(&g); net_ip_dns(&d); net_ip_netmask(&nm);
+            console_printf("net: ip=%u.%u.%u.%u mask=%u.%u.%u.%u gw=%u.%u.%u.%u dns=%u.%u.%u.%u\n",
+                           a.b[0], a.b[1], a.b[2], a.b[3], nm.b[0], nm.b[1], nm.b[2], nm.b[3],
+                           g.b[0], g.b[1], g.b[2], g.b[3], d.b[0], d.b[1], d.b[2], d.b[3]);
+        } else console_write("net: no IP address (run dhcp)\n");
+    } else if (strcmp(tok[0], "netdbg") == 0) {
+        net_dbg();
+    } else if (strcmp(tok[0], "dhcp") == 0) {
+        console_write(net_dhcp() == 0 ? "dhcp: configured\n" : "dhcp: failed\n");
+    } else if (strcmp(tok[0], "ping") == 0) {
+        if (n < 2) { console_write("Usage: ping <ip>\n"); return 0; }
+        ip_t dst;
+        if (!net_parse_ip(tok[1], &dst)) { console_write("ping: bad IP (dotted quad only)\n"); return 0; }
+        console_write(net_ping(dst) == 0 ? "ping: reply received\n" : "ping: no reply\n");
+    } else if (strcmp(tok[0], "dnsset") == 0) {
+        if (n < 2) { console_write("Usage: dnsset <ip>\n"); return 0; }
+        ip_t ip;
+        if (!net_parse_ip(tok[1], &ip)) { console_write("dnsset: bad IP\n"); return 0; }
+        net_set_dns(ip);
+        console_printf("dns server set to %u.%u.%u.%u\n", ip.b[0], ip.b[1], ip.b[2], ip.b[3]);
+    } else if (strcmp(tok[0], "dns") == 0) {
+        if (n < 2) { console_write("Usage: dns <name>\n"); return 0; }
+        ip_t ip;
+        if (net_dns_lookup(tok[1], &ip) == 0)
+            console_printf("dns: %s = %u.%u.%u.%u\n", tok[1], ip.b[0], ip.b[1], ip.b[2], ip.b[3]);
+        else console_write("dns: lookup failed\n");
+    } else if (strcmp(tok[0], "http") == 0) {
+        /* Tokenizer quirk (kept for `write`): after 2 tokens the
+           remainder is `rest`, so path/port come from rest, not
+           tok[2]/tok[3]. */
+        if (n < 2 || !rest || !rest[0]) { console_write("Usage: http <host> <path> [port]\n"); return 0; }
+        char *path = rest;
+        char *sp = path;
+        while (*sp && *sp != ' ') sp++;
+        u16 port = 80;
+        if (*sp) {
+            *sp = 0; sp++;
+            while (*sp == ' ') sp++;
+            if (*sp) {
+                int v = 0, ok = 1;
+                for (const char *p = sp; *p && *p != ' '; p++) {
+                    if (*p < '0' || *p > '9') { ok = 0; break; }
+                    v = v * 10 + (*p - '0');
+                }
+                if (ok && v >= 1 && v <= 65535) port = (u16)v;
+            }
+        }
+        static char body[8192];
+        int bl = net_http_get(tok[1], port, path, body, sizeof(body));
+        if (bl < 0) console_write("http: failed\n");
+        else console_printf("http: %d bytes\n%s\n", bl, body);
+    } else if (strcmp(tok[0], "https") == 0) {
+        if (n < 2 || !rest || !rest[0]) { console_write("Usage: https <host> <path> [port]\n"); return 0; }
+        char *path = rest;
+        char *sp = path;
+        while (*sp && *sp != ' ') sp++;
+        u16 port = 443;
+        if (*sp) {
+            *sp = 0; sp++;
+            while (*sp == ' ') sp++;
+            if (*sp) {
+                int v = 0, ok = 1;
+                for (const char *p = sp; *p && *p != ' '; p++) {
+                    if (*p < '0' || *p > '9') { ok = 0; break; }
+                    v = v * 10 + (*p - '0');
+                }
+                if (ok && v >= 1 && v <= 65535) port = (u16)v;
+            }
+        }
+        static char body[8192];
+        int bl = net_https_get(tok[1], port, path, body, sizeof(body));
+        if (bl == -2) console_write("https: certificate refused, connection not made\n");
+        else if (bl < 0) console_write("https: failed\n");
+        else console_printf("https: %d bytes\n%s\n", bl, body);
+    } else if (strcmp(tok[0], "nettest") == 0) {
+        console_write(net_test_run() == 0 ? "nettest PASS\n" : "nettest FAIL\n");
     } else if (strcmp(tok[0], "mousepoll") == 0) {
         /* Poll the PS/2 controller for 5 seconds, logging any bytes
            that arrive, whether or not IRQ12 fired. Used to diagnose

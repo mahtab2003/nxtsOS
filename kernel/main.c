@@ -15,6 +15,7 @@
 #include "../drivers/mouse.h"
 #include "../drivers/serial.h"
 #include "../fs/vfs.h"
+#include "../net/net.h"
 
 extern u32 __kernel_start, __kernel_end;
 
@@ -29,7 +30,7 @@ void kmain(u32 magic, u32 mbi_addr) {
     serial_init();
     console_init();
     console_write("nxtsOS kernel starting\n");
-    console_write("nxtsOS v0.8.0 - original kernel, Multiboot boot\n");
+    console_write("nxtsOS v0.9.0 - original kernel, Multiboot boot\n");
     if (magic != 0x2BADB002) panic("bad Multiboot magic");
     /* Save framebuffer info NOW, before PMM can overwrite GRUB's
        Multiboot info page (see fb_parse). */
@@ -87,6 +88,10 @@ void kmain(u32 magic, u32 mbi_addr) {
     (void)keyboard_drain_controller();
     __asm__ volatile ("sti");
     console_write("Interrupts enabled\n");
+    /* Network: NIC init must not fail the boot (a VM without a
+       NIC still boots to the shell; net commands report it). */
+    if (net_init() == 0) console_write("Network: e1000 ready (run dhcp)\n");
+    else console_write("Network: no NIC, net commands will report this\n");
     /* Disk encryption unlock, before any filesystem access: an
        encrypted disk needs its passphrase first, or the filesystem
        mount would read ciphertext as a superblock. Unencrypted

@@ -232,23 +232,40 @@ with test + security reports exists in `releases/`.
   after the user's desktop-QEMU report that v0.7.4 was still
   "a bit lagish". QEMU/Bochs PASS; see releases/v0.8.0/.
 
-## Phase 9 — Networking (v0.9.0)
+## Phase 9 — Networking (v0.9.0) — DONE
 
-- [ ] **Task 9.1 — Network stack**
+- [x] **Task 9.1 — Network stack**
   Details: virtual Ethernet (e1000/virtio-net as QEMU provides), DHCP,
   IPv4, DNS, TCP/UDP, socket API, network diagnostics, graphical
   network settings.
-- [ ] **Task 9.2 — TLS and HTTP(S)**
+  Delivered (v0.9.0): e1000 driver (polled), ARP, IPv4, ICMP, UDP,
+  DHCP, DNS, single-connection TCP, HTTP/1.0, diagnostics
+  (`netinfo`, `netdbg`), `nettest` injection suite. NOT delivered:
+  user-mode socket API (kernel + shell only) and graphical network
+  settings — see docs/NETWORKING.md.
+- [x] **Task 9.2 — TLS and HTTP(S)**
   Details: TLS with proper certificate verification (no accept-all
   mode as a default), HTTP/HTTPS client, guest-side connectivity test
   (DHCP + DNS + verified HTTPS request from inside the guest).
-- [ ] **Task 9.3 — Adversarial security test (networking)**
+  Delivered (v0.9.0): TLS 1.2 client, one suite
+  (TLS_RSA_WITH_AES_128_GCM_SHA256), X.509 chain verification,
+  HTTPS client, verified against real OpenSSL servers. Honest
+  limits: no CA trust store (TOFU), weak xorshift RNG, no ECDHE /
+  resumption / ALPN / revocation / TLS 1.3 — see
+  docs/NETWORKING.md.
+- [x] **Task 9.3 — Adversarial security test (networking)**
   Attacker view: a hostile network. Cases: malformed packets, oversized
   packets, DNS answers with huge/invalid records, TLS with an invalid/
   expired/self-signed certificate, certificate for the wrong host,
   connection floods, socket API abuse from user mode. Expected: packets
   dropped cleanly, TLS refused, no kernel fault, no privilege gain.
   Fix, retest, record.
+  Delivered (v0.9.0): tests/security_test_net.py — flood, malformed
+  DNS pointer (fixed: pointer targets now bounds-checked),
+  wrong-host / tampered / expired certs refused, plain-HTTP on TLS
+  port fails cleanly. Socket-API abuse is not testable yet because
+  no user-mode socket API exists in v0.9.0; it must be tested when
+  the API lands.
 
 ## Phase 10 — Modern desktop and applications (v0.10.0)
 
@@ -424,5 +441,5 @@ with test + security reports exists in `releases/`.
   device in sandbox); improvement is argued from pixel
   counts, not a phone fps number.
 
-Current release: **v0.8.0 = Phase 8 desktop**. Next: **Phase 9
-networking**.
+Current release: **v0.9.0 = Phase 9 networking**. Next: **Phase 10
+modern desktop and applications**.
