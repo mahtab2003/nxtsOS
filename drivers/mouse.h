@@ -18,4 +18,6 @@ int  mouse_right(void);
 int  mouse_left_pressed(void); /* edge: became pressed since last call */
 void mouse_feed_byte(u8 b); /* packet assembly, for mousetest injection */
 void mouse_test_set(s32 x, s32 y, int left_btn); /* test-only: set state directly */
+void mouse_set_scale(int s); /* 0=half, 1=normal, 2=double (Phase 8 settings) */
+int  mouse_scale(void);
 #endif

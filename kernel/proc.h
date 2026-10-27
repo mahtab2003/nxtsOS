@@ -35,6 +35,7 @@ int  proc_bg_list(void);   /* prints jobs, returns count */
 int  proc_bg_kill(u32 pid, u32 uid); /* 0 ok, -1 no such job / no permission */
 int  proc_bg_kill_for_uid(u32 uid);  /* logout cleanup, returns count killed */
 int  proc_bg_count(void);
+int  proc_bg_exists(u32 pid); /* 1 if a background job with this pid is still alive */
 void proc_save_from_regs(struct proc *p, struct regs *r);
 void scheduler_run(void);
 void timer_maybe_preempt(struct regs *r);

@@ -202,18 +202,35 @@ with test + security reports exists in `releases/`.
 
 ## Phase 8 — First desktop release (v0.8.0)
 
-- [ ] **Task 8.1 — Desktop shell**
+- [x] **Task 8.1 — Desktop shell** (v0.8.0, 2026-10-27)
   Details: desktop with icons, taskbar, Start-style launcher, system
   tray, clock, notification centre, quick settings, lock screen and
   graphical login (backed by Phase 5 sessions).
-- [ ] **Task 8.2 — Settings and first GUI applications as packages**
+  Delivered: `desktop` shell command, icons, launcher, taskbar
+  (CMOS-RTC clock, session name, bell, gear), notifications,
+  quick settings, lock screen. Honest limit: boot login remains
+  text (Phase 5); the lock screen is the graphical login for
+  re-entry. A full graphical boot login is NOT IMPLEMENTED
+  (it would require restructuring the boot flow).
+- [x] **Task 8.2 — Settings and first GUI applications as packages** (v0.8.0)
   Details: settings app (with search, persistent settings on disk),
   plus at least one functional GUI application, installed as a real
   package via Phase 6 — not an embedded blob.
-- [ ] **Task 8.3 — Adversarial security test (desktop)**
+  Delivered: Settings window (search, idle/mouse/clock/icons,
+  persistent settings.txt), Files window, About window, and
+  Calculator as calc.nxpkg (GUI syscalls 9–13, user windows).
+- [x] **Task 8.3 — Adversarial security test (desktop)** (v0.8.0)
   Attacker view: as Phase 7, plus lock-screen bypass attempts, settings
   that a non-admin user must not change, launcher entries pointing at
   tampered programs. Fix, retest, record.
+  Delivered: tests/security_test_desktop.py — non-admin settings
+  save denied, wrong lock password fails with lock held,
+  malformed GUI syscalls rejected (guibad.elf), tampered
+  Calculator refused by the registry hash check. All PASS.
+  Also: further lag work (true per-window clipping, taskbar
+  skip, 50 Hz throttle, cliptest proving clip == full redraw),
+  after the user's desktop-QEMU report that v0.7.4 was still
+  "a bit lagish". QEMU/Bochs PASS; see releases/v0.8.0/.
 
 ## Phase 9 — Networking (v0.9.0)
 
@@ -407,5 +424,5 @@ with test + security reports exists in `releases/`.
   device in sandbox); improvement is argued from pixel
   counts, not a phone fps number.
 
-Current release: **v0.7.4 = bugfix on Phase 7**. Next: **Phase 8
-desktop**.
+Current release: **v0.8.0 = Phase 8 desktop**. Next: **Phase 9
+networking**.

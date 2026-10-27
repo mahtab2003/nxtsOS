@@ -197,6 +197,20 @@ int fs_list_as(u32 uid) {
     return count;
 }
 int fs_list(void) { return fs_list_as(0); }
+int fs_enum_as(u32 uid, char names[][32], u32 sizes[], int max) {
+    if (!mounted || max <= 0) return 0;
+    int count = 0;
+    for (int i = 0; i < FS_MAX_FILES && count < max; i++) {
+        if (!valid_entry(&dir[i])) continue;
+        if (!can_read_entry(&dir[i], uid)) continue;
+        int j = 0;
+        while (dir[i].name[j] && j < 31) { names[count][j] = dir[i].name[j]; j++; }
+        names[count][j] = 0;
+        sizes[count] = dir[i].size;
+        count++;
+    }
+    return count;
+}
 
 int fs_read_as(const char *name, u8 *buf, u32 buf_size, u32 *out_size, u32 uid) {
     if (!mounted || !valid_name(name)) return -1;

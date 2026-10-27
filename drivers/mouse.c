@@ -2,6 +2,9 @@
 #include "../kernel/fb.h"
 
 static int present = 0;
+static int mouse_scale_val = 1;
+void mouse_set_scale(int s) { if (s < 0) s = 0; if (s > 2) s = 2; mouse_scale_val = s; }
+int mouse_scale(void) { return mouse_scale_val; }
 static s32 mx = 400, my = 300;
 static int left = 0, middle = 0, right = 0;
 static int left_edge = 0; /* set on press, cleared by mouse_left_pressed() */
@@ -95,7 +98,9 @@ void mouse_feed_byte(u8 b) {
         s32 dx = (s32)(char)packet[1];
         s32 dy = (s32)(char)packet[2];
         /* PS/2 Y is positive upwards; screen Y is positive downwards. */
-        mx += dx; my -= dy;
+        if (mouse_scale_val == 2) { mx += dx * 2; my -= dy * 2; }
+        else if (mouse_scale_val == 0) { mx += dx / 2; my -= dy / 2; }
+        else { mx += dx; my -= dy; }
     }
     s32 max_x = fb_ready() ? (s32)fb_width() - 1 : 799;
     s32 max_y = fb_ready() ? (s32)fb_height() - 1 : 599;

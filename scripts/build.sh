@@ -36,11 +36,25 @@ gcc -m32 -ffreestanding -O0 -Wall -Wextra -fno-stack-protector -fno-pic -fno-pie
     -c userland/hello2.c -o build/hello2_main.o
 gcc -m32 -no-pie -Wl,--build-id=none -T userland/linker.ld -nostdlib \
     -o build/hello2.elf build/user_start.o build/hello2_main.o
-ls -l build/hello.elf build/evil.elf build/slow.elf build/greet.elf build/hello2.elf
+gcc -m32 -ffreestanding -O0 -Wall -Wextra -fno-stack-protector -fno-pic -fno-pie -no-pie -nostdlib \
+    -c userland/calc.c -o build/calc_main.o
+gcc -m32 -no-pie -Wl,--build-id=none -T userland/linker.ld -nostdlib \
+    -o build/calc.elf build/user_start.o build/calc_main.o
+gcc -m32 -ffreestanding -O0 -Wall -Wextra -fno-stack-protector -fno-pic -fno-pie -no-pie -nostdlib \
+    -c userland/guibad.c -o build/guibad_main.o
+gcc -m32 -no-pie -Wl,--build-id=none -T userland/linker.ld -nostdlib \
+    -o build/guibad.elf build/user_start.o build/guibad_main.o
+ls -l build/hello.elf build/evil.elf build/slow.elf build/greet.elf build/hello2.elf build/calc.elf build/guibad.elf
+# Calculator package (Phase 8): installable from the shell with
+# `pkg install calc.nxpkg` (the .nxpkg must not be pre-seeded as a
+# plain calc.elf on the same disk, or the install is refused).
+python3 tools/mkpkg.py build/calc.nxpkg --name calc --version 1.0 --file calc.elf:build/calc.elf
 echo "--- version check ---"
 # The kernel banner in main.c must match VERSION, or the bootloader
 # bug from v0.3.0 (stale version in a hand-edited string) recurs.
 grep -q "nxtsOS v$(cat VERSION)" kernel/main.c || { echo "version mismatch: kernel/main.c does not match VERSION"; exit 1; }
+# Same guard for the desktop About window literal (Phase 8).
+grep -q "nxtsOS v$(cat VERSION)" kernel/wm.c || { echo "version mismatch: kernel/wm.c About literal does not match VERSION"; exit 1; }
 echo "--- compiling kernel ---"
 gcc $CFLAGS -c boot/boot.S -o build/boot.o
 gcc $CFLAGS -c drivers/isr.S -o build/isr.o
