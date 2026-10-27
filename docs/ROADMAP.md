@@ -6,8 +6,8 @@ report is in `releases/`.
 
 - [x] Phase 1 — Environment and architecture (this document set, build system)
 - [x] Phase 2 — First bootable image: Multiboot kernel, console, PMM, interrupts
-- [ ] Phase 3 — Kernel fundamentals: paging, scheduler, processes, syscalls,
-      user/kernel ring separation
+- [x] Phase 3 — Kernel fundamentals: paging, scheduler, processes, syscalls,
+      user/kernel ring separation (v0.2.0)
 - [ ] Phase 4 — Graphics and input: VESA/framebuffer, font rendering,
       mouse, widgets, window manager
 - [ ] Phase 5 — First desktop release: taskbar, launcher, windows, settings
@@ -24,4 +24,4 @@ report is in `releases/`.
 - [ ] Phase 10 — Verified releases: archives, checksums, VM guide, and
       (only with explicit authorisation) remote publishing per release
 
-Current release: **v0.1.0 = end of Phase 2**.
+Current release: **v0.2.0 = end of Phase 3**.

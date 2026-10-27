@@ -5,6 +5,7 @@ SECTIONS {
     .multiboot : { *(.multiboot) }
     .text : { *(.text) }
     .rodata : { *(.rodata) }
+    .user_blob : { *(.user_blob) }
     .data : { *(.data) }
     .bss : {
         *(COMMON)

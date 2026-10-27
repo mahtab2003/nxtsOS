@@ -30,7 +30,16 @@ try:
     for _ in range(100):
         if os.path.exists(MON_SOCK): break
         time.sleep(0.1)
-    time.sleep(4)
+    # Wait for the shell prompt (v0.2.0+ runs user processes first,
+    # which takes several seconds) instead of a fixed sleep, so typed
+    # keys are not lost to a shell that has not started yet.
+    for _ in range(400):
+        try:
+            if "nxts> " in open(SERIAL_LOG, errors="replace").read():
+                break
+        except FileNotFoundError:
+            pass
+        time.sleep(0.1)
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.connect(MON_SOCK)
     s.settimeout(2)

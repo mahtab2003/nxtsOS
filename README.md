@@ -4,9 +4,9 @@ An original, ultra-lightweight desktop operating system, built from scratch.
 Not a Linux distribution, not a fork, not a re-themed desktop: nxtsOS boots
 its own kernel.
 
-## Status — v0.1.1 (QEMU-verified boot milestone, NOT a full desktop)
+## Status — v0.2.0 (Phase 3 complete, NOT a desktop yet)
 
-What actually works in v0.1.1, verified by booting the real ISO in QEMU:
+What actually works in v0.2.0, verified by booting the real ISO in QEMU:
 
 - Multiboot boot path (GRUB), 32-bit x86 kernel written from scratch
 - VGA text console + serial (COM1) diagnostic log
@@ -41,8 +41,8 @@ Full instructions, tested configuration, and known issues:
 `docs/VM_GUIDE.md`, `docs/BUILD_AND_TEST.md`, `releases/v0.1.0/TEST_REPORT.md`.
 
 **v0.1.0 warning:** v0.1.0 rebooted in a loop in QEMU (wrong GDT selectors
-— see `releases/v0.1.1/TEST_REPORT.md`). Do not use v0.1.0; use v0.1.1.
-QEMU test: `./scripts/test_boot.sh` — PASS at 128 MB and 64 MB.
+— see `releases/v0.1.1/TEST_REPORT.md`). Do not use v0.1.0; use v0.2.0.
+QEMU tests: `./scripts/test_boot.sh` and `tests/qemu_test_user.py` — PASS.
 
 ## Project layout
 
