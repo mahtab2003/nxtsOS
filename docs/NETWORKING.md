@@ -66,6 +66,12 @@ part of the design, not footnotes.
   Content-Length; chunked Transfer-Encoding is refused;
   body cap is the caller's buffer (the shell passes
   8192 bytes — a 5001-byte body fetches fine).
+  v0.10.0 change: a body longer than the buffer is
+  truncated, not failed — the stored prefix is kept,
+  the rest is drained, and `net_fetch_truncated()`
+  reports it (shell prints "(truncated)", the Web
+  window prints `web: truncated at 8192`). The same
+  rule applies to the HTTPS client.
 
 ## TLS 1.2 client (`net/tls.c`, `net/bignum.c`)
 

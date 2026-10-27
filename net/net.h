@@ -81,8 +81,12 @@ int  net_tcp_connected(void);
 
 /* HTTP (net/net.c, over net_tcp_*). Response body is copied to
    buf (up to max-1 bytes, NUL-terminated); returns body length
-   or -1. Host may be a name (DNS) or dotted IP. */
+   or -1. Host may be a name (DNS) or dotted IP. v0.10.0: a body
+   longer than the buffer is truncated (prefix kept, rest drained)
+   and net_fetch_truncated() reports it, instead of failing. */
 int  net_http_get(const char *host, u16 port, const char *path, char *buf, u32 max);
+int  net_fetch_truncated(void);
+void net_set_fetch_truncated(int v);
 
 /* TLS 1.2 client (net/tls.c). Returns body length or -1; on
    certificate failure returns -2 (refused, never "accept"). */

@@ -101,7 +101,7 @@ delivers keys to the focused window.
 - Once you can type, run `gui` to start the window manager,
   or `kbdstat` to see controller status and last scancode.
 
-## Desktop shell (v0.8.0)
+## Desktop shell (v0.8.0, polished and extended in v0.10.0)
 
 - At the shell prompt, run `desktop` (not `gui`) for the
   desktop shell: icons down the left, Start launcher, taskbar
@@ -113,6 +113,16 @@ delivers keys to the focused window.
   Calc icon (or Start → Calculator). Do NOT put a plain
   `calc.elf` on the same disk, or the install is refused
   ("file already exists on disk").
+- v0.10.0 additions (see docs/DESKTOP.md): Settings has an
+  Appearance page (theme, accent, wallpaper, low-resource,
+  large text, shortcuts); the taskbar WS button switches
+  two workspaces; `[`/`]`/`\` snap windows. Start's second
+  column opens Editor, Monitor, Network, Web, Viewer, and
+  Console — Console needs `term.nxpkg` installed first,
+  same rule as Calculator (no plain `term.elf` on the
+  disk). Files → Open loads .txt into the Editor and .bmp
+  into the Viewer. The Web window fetches text pages; run
+  `dhcp` at the shell prompt before fetching under slirp.
 - Settings: open Settings from an icon or the launcher, change
   a value, click Save. Settings persist in `settings.txt` on
   the disk. If you log in as a non-root user and settings.txt
