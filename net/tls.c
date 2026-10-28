@@ -339,6 +339,13 @@ struct cert_info {
     bn_t modulus; u32 exponent;
     const u8 *sig; u32 sig_len;
     int ca_flag; /* 1 = BC CA:true, 0 = BC CA:false, -1 = no BC */
+    int key_oversize; /* 1 = public key >2048 bits (bn_from_be
+       refused it): the modulus is zeroed, never truncated,
+       so no signature can verify with it. parse_cert still
+       parses the rest of the cert; verify_chain decides
+       whether this cert is inside or beyond the validated
+       path (beyond the anchor / past the truncation point
+       it is ignored, inside it it fails closed). */
     char cn[64];
     char san_dns[MAX_SAN_DNS][64];
     int san_dns_count;
@@ -482,7 +489,22 @@ static int parse_cert(const u8 *buf, u32 len, struct cert_info *ci) {
         if (der_tlv(buf, len, bpos + 1, &rt, &rh, &rv, &rp) != 0 || rt != 0x30) return -1;
         u8 mt; u32 mh, mv, mp;
         if (der_tlv(buf, len, rp, &mt, &mh, &mv, &mp) != 0 || mt != 0x02) return -1;
-        if (bn_from_be(&ci->modulus, buf + mp, mv) != 0) return -1;
+        if (bn_from_be(&ci->modulus, buf + mp, mv) != 0) {
+            /* Oversize key (>2048 bits, e.g. a 4096-bit root
+               like GTS Root R1): bn_from_be zeroes the
+               modulus and fails ONLY on size (see
+               net/bignum.c), so this flag is precise and
+               the key is never silently truncated to 2048
+               bits. The rest of the certificate still
+               parses (dates, issuer/subject, CA flag,
+               signature bytes); verify_chain decides
+               whether this cert lies inside the validated
+               path (then it fails closed: no signature
+               verifies with a zeroed modulus) or beyond
+               it (then it is ignored, exactly as if the
+               server had withheld it). */
+            ci->key_oversize = 1;
+        }
         u32 ep = mp + mv;
         u8 et; u32 eh, ev, epos;
         if (der_tlv(buf, len, ep, &et, &eh, &ev, &epos) != 0 || et != 0x02) return -1;
@@ -590,8 +612,11 @@ static int ascii_equal_nocase(const char *a, const char *b) {
    net_https_get (0) before the handshake; single connection at a
    time, so no race. */
 static int tls_verify_anchored = 0;
-/* Does the terminal certificate's key equal a pinned anchor?
-   Anchors, tried in order (mirrors the package keyring model):
+/* Does the given certificate's key equal a pinned anchor?
+   Called on each chain position in anchored mode (the path
+   ends at the first match) and on the path terminal as an
+   explicit gate. Anchors, tried in order (mirrors the
+   package keyring model):
    the compiled-in anchor (Google Trust Services WR1, which
    issues *.vercel.app), then each well-formed line of the
    root-owned tlsanchors.txt file (one 512-hex-char RSA-2048
@@ -742,17 +767,65 @@ int tls_hostmatch_selftest(void) {
 }
 /* Full chain verification. certs[0] is the leaf. Returns 0 or -1.
    -2 is reserved by the caller for certificate failures; this
-   function only returns 0/-1 (the caller maps -1 to -2). */
+   function only returns 0/-1 (the caller maps -1 to -2).
+   The VALIDATED PATH is a prefix of the presented chain:
+   - Anchored mode: the path ends at the FIRST pinned anchor
+     cert (index >= 1, CA-flagged, key equal to a pinned
+     anchor). Validation stops at the trust anchor (RFC 5280
+     path validation): certs after the anchor are not part
+     of the path, so their dates, names, and signatures are
+     not checked — exactly as if the server had withheld
+     them. A chain with no pinned anchor is refused.
+   - TOFU mode: the path ends just before the first cert
+     whose key is oversize (key_oversize), because no link
+     into such a key can be verified. That is equivalent to
+     the server having withheld that cert and all after it,
+     which TOFU already accepts — so it grants an attacker
+     nothing new: any chain acceptable under truncation is
+     also acceptable with the tail simply not sent. A chain
+     whose LEAF key is oversize is refused (empty path).
+   Inside the path, every rule still holds: dates for every
+   path cert, leaf hostname match, every link's issuer ==
+   next subject + CA flag + signature verification. A link
+   that must actually be verified and cannot be (oversize
+   key, bad signature, wrong name, non-CA issuer) refuses.
+   The anchor's own signature is never verified: the anchor
+   IS the trust root by pinning (its issuer's key is a
+   4096-bit root this 2048-bit kernel cannot verify, which
+   is why pinning exists at all). */
 static int verify_chain(const struct cert_info *certs, int count, const char *host) {
     char now[15];
     rtc_now_str(now);
-    for (int i = 0; i < count; i++) {
+    int path_len = count;
+    if (tls_verify_anchored) {
+        path_len = -1;
+        for (int i = 1; i < count; i++) {
+            if (certs[i].ca_flag == 1 && tls_anchor_match(&certs[i])) {
+                path_len = i + 1;
+                break;
+            }
+        }
+        if (path_len < 0) { return -1; }
+    } else {
+        for (int i = 0; i < count; i++) {
+            if (certs[i].key_oversize) { path_len = i; break; }
+        }
+        if (path_len < 1) { return -1; }
+    }
+    for (int i = 0; i < path_len; i++) {
+        /* Belt-and-braces: no oversize key may sit inside
+           the validated path (in TOFU mode the path ends
+           before the first oversize cert by construction;
+           in anchored mode a pinned anchor is 2048-bit by
+           construction, so an oversize cert here means a
+           broken path, not a trailing root). */
+        if (certs[i].key_oversize) { return -1; }
         /* Validity dates (lexicographic on canonical strings). */
         if (strcmp(certs[i].not_before, now) > 0) { return -1; }
         if (strcmp(now, certs[i].not_after) > 0) { return -1; }
     }
     if (verify_host(&certs[0], host) != 0) { return -1; }
-    for (int i = 0; i + 1 < count; i++) {
+    for (int i = 0; i + 1 < path_len; i++) {
         /* Issuer name must equal the next cert's subject. */
         if (certs[i].issuer_len != certs[i + 1].subject_len) return -1;
         if (memcmp(certs[i].issuer, certs[i + 1].subject, certs[i].issuer_len) != 0) return -1;
@@ -760,20 +833,21 @@ static int verify_chain(const struct cert_info *certs, int count, const char *ho
         if (certs[i + 1].ca_flag != 1) return -1;
         if (verify_signature(&certs[i], &certs[i + 1].modulus, certs[i + 1].exponent) != 0) return -1;
     }
-    /* Terminal certificate: anchored mode requires a pinned
-       anchor key (CA-flagged; NOT self-signed — an intermediate
-       like WR1 is issued by a root above it, whose 4096-bit key
-       this 2048-bit kernel cannot verify, so the anchor IS the
-       trust root by pinning). TOFU mode trusts the presented
-       chain on first use: every link's signature must verify
+    /* Terminal certificate of the VALIDATED PATH (not
+       necessarily the last presented cert — see above).
+       Anchored mode: the path terminal IS a pinned anchor
+       by construction; the checks below restate that gate
+       explicitly. TOFU mode trusts the presented path on
+       first use: every link's signature must verify
        (checked above), the leaf must match the host, dates
        must hold — and the terminal must either be self-signed
        with a verifying self-signature (the single-cert case,
        rule unchanged) or a real CA (CA:true). Real servers
-       never send their root, so demanding a self-signed
-       terminal refused every real site (v1.1.0 real-device
-       bug: example.com always "certificate refused"). */
-    const struct cert_info *root = &certs[count - 1];
+       that withhold their root end at an intermediate CA;
+       servers that SEND their root (Vercel sends GTS Root
+       R1) end at the anchor / truncation point instead —
+       the same path, the same trust. */
+    const struct cert_info *root = &certs[path_len - 1];
     if (tls_verify_anchored) {
         if (root->ca_flag != 1) { return -1; }
         if (!tls_anchor_match(root)) { return -1; }

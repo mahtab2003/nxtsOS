@@ -8,6 +8,36 @@
 > contemporary notes, and no test result is claimed here beyond what
 > those reports record. Entries 0.1.0–0.2.0 are the original notes.
 
+## 1.1.2 — Patch release: TLS chain fix for the live repo host
+
+- The user reported on v1.1.1 that `pkg repo
+  https://nxtsos-repo.vercel.app/` + `pkg update` still answered
+  "repository certificate refused". The v1.1.1 TOFU fix did not
+  cover the path the way the brief assumed (`https://` = TOFU
+  mode, `httpsa://` = anchored mode) — and the anchored path
+  would have refused the same chain too.
+- Root cause (verified from the live server): Vercel sends three
+  certificates — leaf (RSA-2048) + WR1 intermediate (RSA-2048, the
+  pinned anchor) + GTS Root R1 (RSA-4096). The kernel's 2048-bit
+  bignum refused to parse the 4096-bit root before verification
+  ever ran, in both modes.
+- Fix (`net/tls.c` only): the validated path is now a prefix of
+  the presented chain — anchored mode stops at the first pinned
+  anchor (later certificates ignored, per RFC 5280); TOFU mode
+  stops just before the first oversize-key certificate (equal to
+  the server withholding that tail, which TOFU already allowed).
+  Every rule inside the path still holds (dates, hostname, every
+  link's issuer/subject + CA flag + signature); oversize keys
+  that must actually be verified still refuse.
+- New peer-harness suite `tls_anchor_stop` (8/8) proves the fix
+  with the exact live chain; full regression 28 + 48 suites ALL
+  PASS on the release ISO. `docs/NETWORKING.md` TLS section
+  corrected to the new rules.
+- NOT TESTED (honest): live Vercel guest fetch from the kernel
+  (sandbox slirp DNS block); user-side Virt-Manager retest is the
+  key remaining live proof. 4096-bit RSA verification for links
+  that must actually be verified is still NOT IMPLEMENTED.
+
 ## 1.1.1 — Patch release: three fixes for user-reported v1.1.0 bugs
 
 - TLS TOFU chain rule: a self-signed terminal was demanded, which

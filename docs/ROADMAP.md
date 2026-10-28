@@ -463,16 +463,17 @@ with test + security reports exists in `releases/`.
   device in sandbox); improvement is argued from pixel
   counts, not a phone fps number.
 
-Current release: **v1.1.1 = patch release over v1.1.0: three fixes
-for bugs the user found testing v1.1.0 on real QEMU/KVM — TLS TOFU
-chain rule (real sites no longer "certificate refused"), desktop
-fallback green repaint (fallback now dispatches on the active UI),
-console cursor present (typed input + cursor reach a real display)
-— plus mode-30 fallback autotest and tls_chain / desktop_fallback /
-shell_echo / tls_ske suites**. Next: **post-v1.1.1 extension** per the standing
-direction below (a due release must ship on its own as soon as
-work is release-worthy — never deferred behind audit/polish
-chunks, never waiting for the user to ask).
+Current release: **v1.1.2 = patch release over v1.1.1: TLS
+certificate-chain verification fix for the live package
+repository host — anchored verification now terminates at the
+first pinned anchor and TOFU truncates at the first oversize-key
+certificate, so Vercel's 3-cert chain (leaf + WR1 + 4096-bit R1)
+no longer fails with "certificate refused" — plus the new
+tls_anchor_stop suite (8/8, exact live chain)**. Next: **queued
+web/SSL work** per the standing direction below (a due release
+must ship on its own as soon as work is release-worthy — never
+deferred behind audit/polish chunks, never waiting for the user
+to ask).
 
 ## Standing direction (updated by the user 2026-10-27 — adds to
 all previous instructions, does not replace them)
