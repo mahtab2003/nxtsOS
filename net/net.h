@@ -92,6 +92,13 @@ void net_set_fetch_truncated(int v);
    certificate failure returns -2 (refused, never "accept"). */
 int  net_https_get(const char *host, u16 port, const char *path, char *buf, u32 max);
 int  net_https_get_anchored(const char *host, u16 port, const char *path, char *buf, u32 max);
+int  net_https_get_store(const char *host, u16 port, const char *path, char *buf, u32 max);
+int  tls_tofu_print_list(void);   /* 0 ok, -1 no file/error */
+int  tls_tofu_print_clear(const char *host); /* 0 removed, 1 absent, -1 error */
+int  tls_castore_add(const char *line); /* 0 ok, 1 already present, -1 error */
+int  tls_key_line_valid(const char *line, u32 ll); /* 1 = well-formed RSA/EC store line */
+int  tls_castore_update(const char *host, u16 port, u32 *count_out);
+/* 0 ok, -1 fetch, -2 signature, -3 malformed, -4 install */
 
 /* Adversarial test entry (net/nettest.c). */
 int  net_test_run(void);         /* 0 all checks pass */

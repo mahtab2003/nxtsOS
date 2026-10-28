@@ -111,8 +111,36 @@ int main(void) {
     if (p256_ecdh(priv, gx, bad_y, shared) == 0) { printf("FAIL off-curve accepted\n"); fails++; }
     else printf("PASS off-curve refused\n");
     /* Private key 0 and >= n must fail. */
-    if (p256_pub_from_priv(zero, x, y) == 0) { printf("FAIL priv 0 accepted\n"); fails++; }
+    if (p256_pub_from_priv(zero, x, y) == 0) { printf("FAIL priv 0 refused\n"); fails++; }
     else printf("PASS priv 0 refused\n");
+
+    /* ECDSA P-256/SHA-256 vector (generated with the python
+       cryptography lib; lib-verified before hardcoding).
+       Public key, hash, (r, s) below; negatives flip one
+       input each and must all refuse. */
+    {
+        u8 qx[32], qy[32], hash[32], r[32], s[32];
+        hex_to_bytes("471c3e758c4904285bba7e53118ed0f524adeb0757d25bd2f8e7b0d76dfa714c", qx);
+        hex_to_bytes("dd520f7aca8a8b917acc37f51de8f0c9bbe3ad858382e702dc25a12d09f7a858", qy);
+        hex_to_bytes("6d1980685444f6b1984fa64cd7d3736d92209a56b103bca4d1b034becdafb7d1", hash);
+        hex_to_bytes("a6828d5600dcaa7ed92c3bcc658a3ea745389d083040a29fd508a50de809f61f", r);
+        hex_to_bytes("0a3c7376b7bb92d8cc971b891c0b761d748c0c8ad2499b24ea153dd43a5cdc28", s);
+        if (p256_ecdsa_verify(qx, qy, hash, r, s) != 0) { printf("FAIL ECDSA verify\n"); fails++; }
+        else printf("PASS ECDSA verify\n");
+        u8 bad[32];
+        memcpy(bad, s, 32); bad[31] ^= 1;
+        if (p256_ecdsa_verify(qx, qy, hash, r, bad) == 0) { printf("FAIL ECDSA bad-s accepted\n"); fails++; }
+        else printf("PASS ECDSA bad-s refused\n");
+        memcpy(bad, hash, 32); bad[0] ^= 1;
+        if (p256_ecdsa_verify(qx, qy, bad, r, s) == 0) { printf("FAIL ECDSA bad-hash accepted\n"); fails++; }
+        else printf("PASS ECDSA bad-hash refused\n");
+        memset(bad, 0, 32);
+        if (p256_ecdsa_verify(qx, qy, hash, bad, s) == 0) { printf("FAIL ECDSA r=0 accepted\n"); fails++; }
+        else printf("PASS ECDSA r=0 refused\n");
+        memcpy(bad, qy, 32); bad[31] ^= 1;
+        if (p256_ecdsa_verify(qx, bad, hash, r, s) == 0) { printf("FAIL ECDSA off-curve Q accepted\n"); fails++; }
+        else printf("PASS ECDSA off-curve Q refused\n");
+    }
 
     printf(fails ? "HOST EC256 FAIL (%d)\n" : "HOST EC256 PASS\n", fails);
     return fails ? 1 : 0;

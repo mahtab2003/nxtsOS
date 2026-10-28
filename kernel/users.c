@@ -1,7 +1,8 @@
 #include "users.h"
 #include "console.h"
+#include "csprng.h"
 #include "../fs/vfs.h"
-#include "../drivers/pit.h" /* timer_ticks: the only in-kernel entropy source for salts */
+#include "../drivers/pit.h" /* timer_ticks: fallback counter only */
 
 struct user_rec {
     char name[32];
@@ -166,13 +167,17 @@ static char passwd_file_buf[1024];
 
 static void gen_salt(char *out, u32 uid) {
     static const char alpha[] = "abcdefghijklmnopqrstuvwxyz0123456789";
-    u32 s = timer_ticks ^ (passwd_counter * 2654435761u) ^ (uid * 40503u)
-        ^ 0x9E3779B9u;
+    /* Salts need uniqueness, not secrecy — but there is no
+       reason to keep the old predictable timer/xorshift
+       construction now that the CSPRNG exists. The uid and a
+       counter are still folded in so two salts for one user
+       can never repeat even if the DRBG state did. */
+    u8 rnd[12];
+    csprng_generate(rnd, sizeof(rnd));
+    (void)uid;
+    for (int i = 0; i < 12; i++)
+        out[i] = alpha[(rnd[i] + (u8)(passwd_counter + (u32)i)) % 36];
     passwd_counter++;
-    for (int i = 0; i < 12; i++) {
-        s ^= s << 13; s ^= s >> 17; s ^= s << 5; /* xorshift32 */
-        out[i] = alpha[s % 36];
-    }
     out[12] = 0;
 }
 

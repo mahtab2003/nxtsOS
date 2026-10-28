@@ -403,3 +403,104 @@ int p256_ecdh(const u8 priv_be[32],
     fe_to_be(&x, shared);
     return 0;
 }
+
+/* ---------- mod-n arithmetic (ECDSA only) ----------
+   Same schoolbook + binary-division design as fe_mul, but
+   modulo the curve order n instead of the field prime p.
+   n_mul/n_inv are used only by ECDSA verification (small
+   counts: a handful of multiplies and one inversion per
+   signature), so the slow division is irrelevant here. */
+/* r = (a * b) mod n. */
+static void n_mul(fe_t *r, const fe_t *a, const fe_t *b) {
+    fe16_t prod, rem, n16;
+    memset(&prod, 0, sizeof(prod));
+    for (int i = 0; i < 8; i++) {
+        if (a->d[i] == 0) continue;
+        u32 carry = 0;
+        for (int j = 0; j < 8; j++) {
+            int k = i + j;
+            u64 cur = (u64)prod.d[k] + (u64)a->d[i] * b->d[j] + carry;
+            prod.d[k] = (u32)cur;
+            carry = (u32)(cur >> 32);
+        }
+        for (int k = i + 8; carry && k < 16; k++) {
+            u64 cur = (u64)prod.d[k] + carry;
+            prod.d[k] = (u32)cur;
+            carry = (u32)(cur >> 32);
+        }
+    }
+    memset(&n16, 0, sizeof(n16));
+    for (int i = 0; i < 8; i++) n16.d[i] = P256_N[i];
+    memset(&rem, 0, sizeof(rem));
+    int n = w16_bitlen(&prod);
+    for (int i = n - 1; i >= 0; i--) {
+        w16_shl1(&rem);
+        if (w16_getbit(&prod, i)) rem.d[0] |= 1;
+        if (w16_cmp(&rem, &n16) >= 0) w16_sub(&rem, &n16);
+    }
+    fe_zero(r);
+    for (int i = 0; i < 8; i++) r->d[i] = rem.d[i];
+}
+/* r = a^-1 mod n (a != 0), via a^(n-2). */
+static void n_inv(fe_t *r, const fe_t *a) {
+    fe_t res, base, nminus2;
+    fe_one(&res);
+    fe_copy(&base, a);
+    fe_const(&nminus2, P256_N);
+    nminus2.d[0] -= 2; /* n is odd: no borrow */
+    for (int i = 255; i >= 0; i--) {
+        /* Square-and-multiply mod n (not mod p: the
+           squaring/multiplying here must reduce by n). */
+        n_mul(&res, &res, &res);
+        if ((nminus2.d[i / 32] >> (i % 32)) & 1) n_mul(&res, &res, &base);
+    }
+    *r = res;
+}
+/* r = a - b, requires a >= b (single borrow chain, no mod). */
+static void n_sub_raw(fe_t *r, const fe_t *a, const fe_t *b) {
+    fe_t s;
+    u32 borrow = 0;
+    for (int i = 0; i < 8; i++) {
+        u64 cur = (u64)a->d[i] - b->d[i] - borrow;
+        s.d[i] = (u32)cur;
+        borrow = (u32)(cur >> 32) ? 1 : 0;
+    }
+    *r = s;
+}
+
+int p256_ecdsa_verify(const u8 qx_be[32], const u8 qy_be[32],
+                      const u8 hash[32],
+                      const u8 r_be[32], const u8 s_be[32]) {
+    if (p256_point_valid(qx_be, qy_be) != 0) return -1;
+    fe_t n, r, s, e;
+    fe_const(&n, P256_N);
+    fe_from_be(&r, r_be);
+    fe_from_be(&s, s_be);
+    if (fe_is_zero(&r) || fe_is_zero(&s)) return -1;
+    if (fe_cmp(&r, &n) >= 0 || fe_cmp(&s, &n) >= 0) return -1;
+    fe_from_be(&e, hash);
+    /* e < 2^256 < 2n (n is ~2^256 - 2^224), so one conditional
+       subtraction reduces e mod n. */
+    if (fe_cmp(&e, &n) >= 0) n_sub_raw(&e, &e, &n);
+    fe_t w, u1, u2;
+    n_inv(&w, &s);
+    n_mul(&u1, &e, &w);
+    n_mul(&u2, &r, &w);
+    u8 u1be[32], u2be[32];
+    fe_to_be(&u1, u1be);
+    fe_to_be(&u2, u2be);
+    fe_t gx, gy, px, py;
+    fe_from_be(&gx, P256_GX);
+    fe_from_be(&gy, P256_GY);
+    fe_from_be(&px, qx_be);
+    fe_from_be(&py, qy_be);
+    jac_t a, b, sum;
+    point_mul(&a, &gx, &gy, u1be);
+    point_mul(&b, &px, &py, u2be);
+    jac_add(&sum, &a, &b);
+    fe_t x, y;
+    if (jac_to_affine(&sum, &x, &y) != 0) return -1;
+    /* x < p < 2n, so again one conditional subtraction. */
+    if (fe_cmp(&x, &n) >= 0) n_sub_raw(&x, &x, &n);
+    return fe_cmp(&x, &r) == 0 ? 0 : -1;
+}

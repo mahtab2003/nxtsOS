@@ -1,4 +1,6 @@
 #include "mouse.h"
+#include "pit.h"
+#include "../kernel/csprng.h"
 #include "../kernel/fb.h"
 
 static int present = 0;
@@ -80,6 +82,14 @@ void mouse_irq_handler(void) {
    costs at most one discarded byte, not a permanently misaligned
    packet stream. */
 void mouse_feed_byte(u8 b) {
+    /* Entropy: the packet byte plus arrival timing, same
+       reasoning as keyboard_feed. */
+    u32 t = timer_ticks;
+    u8 sample[5];
+    sample[0] = b;
+    sample[1] = (u8)t; sample[2] = (u8)(t >> 8);
+    sample[3] = (u8)(t >> 16); sample[4] = (u8)(t >> 24);
+    csprng_stir(sample, sizeof(sample));
     if (pkt_idx == 0 && (b & 0x08) == 0) return;
     packet[pkt_idx++] = b;
     if (pkt_idx < 3) return;

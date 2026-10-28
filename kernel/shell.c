@@ -6,6 +6,7 @@
 #include "pkg.h"
 #include "sha256.h"
 #include "aes.h"
+#include "csprng.h"
 #include "wm.h"
 #include "fb.h"
 #include "../drivers/mouse.h"
@@ -308,7 +309,7 @@ static int execute(char *line) {
     int n = tokenize(line, tok, &rest);
     if (n == 0) return 0;
     if (strcmp(tok[0], "help") == 0) {
-        console_write("Commands: help, mem, ticks, clear, reboot, fs, ls, cat <file>, write <file> <text>, rm <file>, mv <old> <new>, cp <src> <dst>, chmod <file> <mode>, run <file>, runbg <file>, jobs, kill <pid>, lock, unlock <user>, passwd [user], whoami, logout, idle [minutes|off], fbinfo, kbdstat, pkg list, pkg avail, pkg install <file>, pkg install <name>, pkg remove <name>, pkg remove <name> force, pkg repo [url], pkg update, pkg fetch <name>, sysupdate <bundle>, sysrollback, sha256 <file>, aes-test, gui, wmautotest, guitest, cursortest, cliptest, stormtest, desktop, desktopautotest, desktopsectest, desktopcalctest, desktop10test, desktopappstest, desktop10sec, desktopwebtest, desktopnonic, desktoprepotest, desktoprepoapptest, desktoppackageapptest, desktopfileinstalltest, desktopfileruntest, desktopmonitorjobtest, desktopreboottest, desktoplogouttest, desktopfilesysupdtest, desktoprollbacktest, desktopreposettest, desktopdnssettest, desktopnetpingtest, desktoprepofetchtest, desktopfileshashtest, desktopmonitordisktest, desktopwebsavetest, desktopfileschmodtest, desktopreporoottest, desktopsettingsunlocktest, desktopunlocknousertest, desktopfallbacktest, mouse, mousetest, mousepoll, netinfo, netdbg, dhcp, ping <ip>, dns <name>, dnsset <ip>, http <host> <path>, https <host> <path>, httpsa <host> <path>, nettest, hostmatch\n");
+        console_write("Commands: help, mem, ticks, clear, reboot, fs, ls, cat <file>, write <file> <text>, rm <file>, mv <old> <new>, cp <src> <dst>, chmod <file> <mode>, run <file>, runbg <file>, jobs, kill <pid>, lock, unlock <user>, passwd [user], whoami, logout, idle [minutes|off], fbinfo, kbdstat, pkg list, pkg avail, pkg install <file>, pkg install <name>, pkg remove <name>, pkg remove <name> force, pkg repo [url], pkg update, pkg fetch <name>, sysupdate <bundle>, sysrollback, sha256 <file>, aes-test, gui, wmautotest, guitest, cursortest, cliptest, stormtest, desktop, desktopautotest, desktopsectest, desktopcalctest, desktop10test, desktopappstest, desktop10sec, desktopwebtest, desktopnonic, desktoprepotest, desktoprepoapptest, desktoppackageapptest, desktopfileinstalltest, desktopfileruntest, desktopmonitorjobtest, desktopreboottest, desktoplogouttest, desktopfilesysupdtest, desktoprollbacktest, desktopreposettest, desktopdnssettest, desktopnetpingtest, desktoprepofetchtest, desktopfileshashtest, desktopmonitordisktest, desktopwebsavetest, desktopfileschmodtest, desktopreporoottest, desktopsettingsunlocktest, desktopunlocknousertest, desktopfallbacktest, mouse, mousetest, mousepoll, netinfo, netdbg, dhcp, ping <ip>, dns <name>, dnsset <ip>, http <host> <path>, https <host> <path>, httpsa <host> <path>, httpss <host> <path>, castore list|add|update|clear, tofprints list|clear, csprngtest, nettest, hostmatch\n");
     } else if (strcmp(tok[0], "idle") == 0) {
         if (n < 2) {
             if (idle_timeout_minutes == 0) console_write("Idle timeout: disabled (never locks on idle)\n");
@@ -778,6 +779,130 @@ static int execute(char *line) {
         if (bl == -2) console_write("httpsa: certificate refused, connection not made\n");
         else if (bl < 0) console_write("httpsa: failed\n");
         else console_printf("httpsa: %d bytes%s\n%s\n", bl, net_fetch_truncated() ? " (truncated)" : "", body);
+    } else if (strcmp(tok[0], "httpss") == 0) {
+        if (n < 2 || !rest || !rest[0]) { console_write("Usage: httpss <host> <path> [port]\n"); return 0; }
+        char *path = rest;
+        char *sp = path;
+        while (*sp && *sp != ' ') sp++;
+        u16 port = 443;
+        if (*sp) {
+            *sp = 0; sp++;
+            while (*sp == ' ') sp++;
+            if (*sp) {
+                int v = 0, ok = 1;
+                for (const char *p = sp; *p && *p != ' '; p++) {
+                    if (*p < '0' || *p > '9') { ok = 0; break; }
+                    v = v * 10 + (*p - '0');
+                }
+                if (ok && v >= 1 && v <= 65535) port = (u16)v;
+            }
+        }
+        static char body[8192];
+        int bl = net_https_get_store(tok[1], port, path, body, sizeof(body));
+        if (bl == -2) console_write("httpss: certificate refused, connection not made\n");
+        else if (bl < 0) console_write("httpss: failed\n");
+        else console_printf("httpss: %d bytes%s\n%s\n", bl, net_fetch_truncated() ? " (truncated)" : "", body);
+    } else if (strcmp(tok[0], "csprngtest") == 0) {
+        console_write(csprng_selftest() == 0 ? "csprngtest PASS\n" : "csprngtest FAIL\n");
+    } else if (strcmp(tok[0], "castore") == 0) {
+        if (n < 2) { console_write("Usage: castore list|add <file>|update <host> [port]|clear\n"); return 0; }
+        if (strcmp(tok[1], "list") == 0) {
+            /* Count well-formed lines (RSA or EC) with
+               windowed reads, so a store larger than any
+               one buffer still lists. A partial line is
+               carried across window boundaries. */
+            static u8 win[1024];
+            static char linebuf[513];
+            u32 off = 0, count = 0, line_len = 0;
+            int have = 0;
+            for (;;) {
+                u32 got = 0;
+                if (fs_read_range_as("castore.txt", win, sizeof(win), off, &got, session_uid) != 0) break;
+                if (got == 0) break;
+                have = 1; off += got;
+                for (u32 i = 0; i < got; i++) {
+                    u8 c = win[i];
+                    if (c == '\n') {
+                        if (tls_key_line_valid(linebuf, line_len)) count++;
+                        line_len = 0;
+                    } else if (line_len < 512) {
+                        linebuf[line_len++] = (char)c;
+                    } else {
+                        line_len = 513; /* overlong: not well-formed */
+                    }
+                }
+            }
+            if (line_len > 0 && line_len < 513 &&
+                tls_key_line_valid(linebuf, line_len)) count++;
+            if (!have) console_write("castore: no store\n");
+            else console_printf("castore: %u roots\n", count);
+        } else if (strcmp(tok[1], "add") == 0) {
+            if (session_uid != 0) { console_write("castore: root only\n"); return 0; }
+            if (!rest || !rest[0]) { console_write("Usage: castore add <file>\n"); return 0; }
+            /* The key line comes from a FILE, not a literal:
+               the shell line buffer is 128 chars, so a
+               512-char hex argument could never be typed.
+               The file's first line must be exactly one
+               well-formed store line: a 512-hex RSA modulus
+               or an "EC256:" P-256 point line. */
+            static u8 hexbuf[8192];
+            u32 hsize = 0;
+            if (fs_read_as(rest, hexbuf, sizeof(hexbuf) - 1, &hsize, session_uid) != 0) {
+                console_write("castore: add failed\n");
+            } else {
+                hexbuf[hsize] = 0;
+                u32 hl = 0;
+                while (hl < hsize && hexbuf[hl] != '\n' && hexbuf[hl] != '\r') hl++;
+                hexbuf[hl] = 0;
+                int arc = tls_castore_add((const char *)hexbuf);
+                console_write(arc == 0 ? "castore: added\n" : arc == 1 ? "castore: already present\n" : "castore: add failed\n");
+            }
+        } else if (strcmp(tok[1], "update") == 0) {
+            if (session_uid != 0) { console_write("castore: root only\n"); return 0; }
+            if (!rest || !rest[0]) { console_write("Usage: castore update <host> [port]\n"); return 0; }
+            char *host = rest;
+            char *sp = host;
+            while (*sp && *sp != ' ') sp++;
+            u16 port = 443;
+            if (*sp) {
+                *sp = 0; sp++;
+                while (*sp == ' ') sp++;
+                if (*sp) {
+                    int v = 0, ok = 1;
+                    for (const char *p = sp; *p && *p != ' '; p++) {
+                        if (*p < '0' || *p > '9') { ok = 0; break; }
+                        v = v * 10 + (*p - '0');
+                    }
+                    if (ok && v >= 1 && v <= 65535) port = (u16)v;
+                }
+            }
+            u32 count = 0;
+            int rc = tls_castore_update(host, port, &count);
+            if (rc == 0) console_printf("castore: updated %u roots\n", count);
+            else if (rc == -1) console_write("castore: update fetch failed\n");
+            else if (rc == -2) console_write("castore: update signature invalid, not installed\n");
+            else if (rc == -3) console_write("castore: update bundle malformed, not installed\n");
+            else console_write("castore: update install failed\n");
+        } else if (strcmp(tok[1], "clear") == 0) {
+            if (session_uid != 0) { console_write("castore: root only\n"); return 0; }
+            console_write(fs_delete_as("castore.txt", session_uid) == 0 ? "castore: cleared\n" : "castore: no store\n");
+        } else {
+            console_write("Usage: castore list|add <file>|update <host> [port]|clear\n");
+        }
+    } else if (strcmp(tok[0], "tofprints") == 0) {
+        if (session_uid != 0) { console_write("tofprints: root only\n"); return 0; }
+        if (n < 2) { console_write("Usage: tofprints list|clear <host>\n"); return 0; }
+        if (strcmp(tok[1], "list") == 0) {
+            if (tls_tofu_print_list() != 0) console_write("tofprints: none stored\n");
+        } else if (strcmp(tok[1], "clear") == 0) {
+            if (!rest || !rest[0]) { console_write("Usage: tofprints clear <host>\n"); return 0; }
+            int rc = tls_tofu_print_clear(rest);
+            if (rc == 0) console_write("tofprints: cleared\n");
+            else if (rc == 1) console_write("tofprints: not present\n");
+            else console_write("tofprints: error\n");
+        } else {
+            console_write("Usage: tofprints list|clear <host>\n");
+        }
     } else if (strcmp(tok[0], "nettest") == 0) {
         console_write(net_test_run() == 0 ? "nettest PASS\n" : "nettest FAIL\n");
     } else if (strcmp(tok[0], "hostmatch") == 0) {

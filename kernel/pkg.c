@@ -355,6 +355,15 @@ static int pkg_verify_sig(const u8 *msg, u32 msg_len, const u8 *sig) {
     return -1;
 }
 
+/* Exported for the CA-store updater (net/tls.c): verify a
+   vendor signature over arbitrary bytes with exactly the
+   package trust anchors (compiled-in vendor key, then the
+   pubkeys.txt keyring). A store bundle signed by any
+   package-trusted key is accepted, mirroring packages. */
+int pkg_verify_vendor_sig(const u8 *msg, u32 msg_len, const u8 *sig) {
+    return pkg_verify_sig(msg, msg_len, sig);
+}
+
 static int pkg_verify_signature(const u8 *buf, const struct pkg_manifest *m) {
     return pkg_verify_sig(buf + 12, m->mlen, m->sig);
 }

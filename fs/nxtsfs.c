@@ -79,11 +79,16 @@ static int is_system_file(const char *name) {
         || strcmp(name, "rollback.txt") == 0 || strcmp(name, "rb_packages.txt") == 0
         || strcmp(name, "repo.txt") == 0
         || strcmp(name, "repo_index.txt") == 0 || strcmp(name, "repo_index.sig") == 0
-        || strcmp(name, "tlsanchors.txt") == 0)
+        || strcmp(name, "tlsanchors.txt") == 0
+        || strcmp(name, "castore.txt") == 0 || strcmp(name, "tofuprints.txt") == 0)
         return 1;
     /* Rollback backups rb0..rb63 (Phase 11 snapshot): same rule —
        a non-root user must not pre-create one, or a later root
-       snapshot could be tricked into trusting attacker content. */
+       snapshot could be tricked into trusting attacker content.
+       castore.txt (Phase 13 CA store) and tofuprints.txt
+       (Phase 13 TOFU pins) join for the same reason as
+       tlsanchors.txt: a planted store member or print would
+       let later handshakes trust an attacker's chain. */
     if (name[0] == 'r' && name[1] == 'b' && name[2] >= '0' && name[2] <= '9') {
         if (name[3] == 0) return 1;
         if (name[3] >= '0' && name[3] <= '9' && name[4] == 0) return 1;

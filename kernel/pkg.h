@@ -10,6 +10,10 @@ int  pkg_registry_entry(int idx, char *name, char *version);
 int  pkg_install(const char *pkgfile);
 int  pkg_remove(const char *name, int force);
 int  pkg_verify_file(const char *name, const u8 *data, u32 len);
+/* Vendor-signature check over arbitrary bytes (package trust
+   anchors: compiled-in vendor key, then pubkeys.txt keyring).
+   Used by the CA-store updater for signed store bundles. */
+int  pkg_verify_vendor_sig(const u8 *msg, u32 msg_len, const u8 *sig);
 int  pkg_sysupdate(const char *bundlefile);
 int  pkg_sysrollback(void);
 int  pkg_repo_show(void);

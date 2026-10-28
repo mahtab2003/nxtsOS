@@ -11,6 +11,7 @@
 #include "../mm/pmm.h"
 #include "../mm/vmm.h"
 #include "../drivers/pit.h"
+#include "../kernel/csprng.h"
 
 /* PCI config ports. */
 static u32 pci_cfg_read(u32 dev, u32 func, u32 off) {
@@ -160,6 +161,10 @@ int net_init(void) {
     our_mac.b[4] = (u8)rah; our_mac.b[5] = (u8)(rah >> 8);
     console_printf("net: MAC %x:%x:%x:%x:%x:%x\n", our_mac.b[0], our_mac.b[1],
                    our_mac.b[2], our_mac.b[3], our_mac.b[4], our_mac.b[5]);
+    /* Stir the MAC into the CSPRNG pool for device uniqueness
+       ONLY: a MAC is visible on the LAN and is never counted
+       as secret entropy (see csprng.h). */
+    csprng_stir(our_mac.b, 6);
     /* RX ring. */
     memset(rx_ring, 0, sizeof(rx_ring));
     for (int i = 0; i < RX_COUNT; i++) {

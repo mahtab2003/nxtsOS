@@ -4,6 +4,7 @@
 #include "shell.h"
 #include "proc.h"
 #include "enc.h"
+#include "csprng.h"
 #include "fb.h"
 #include "../mm/pmm.h"
 #include "../mm/vmm.h"
@@ -77,6 +78,7 @@ void kmain(u32 magic, u32 mbi_addr) {
     idt_init();
     pic_init();
     pit_init();
+    csprng_init();
     keyboard_init();
     if (mouse_init()) console_write("Mouse: PS/2 mouse detected\n");
     else console_write("Mouse: not detected (GUI cursor will not move)\n");

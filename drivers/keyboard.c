@@ -1,5 +1,7 @@
 #include "keyboard.h"
 #include "mouse.h"
+#include "pit.h"
+#include "../kernel/csprng.h"
 
 /* PS/2 set 1, US layout. Index = scancode. 0 = no printable key. */
 static const char normal[128] = {
@@ -127,6 +129,15 @@ static void push_char(char c) {
 }
 
 static void keyboard_feed(u8 sc) {
+    /* Entropy: the scancode plus the timer-tick count at the
+       moment it arrived. The tick count is what carries the
+       timing jitter — the scancode alone is guessable. */
+    u32 t = timer_ticks;
+    u8 sample[5];
+    sample[0] = sc;
+    sample[1] = (u8)t; sample[2] = (u8)(t >> 8);
+    sample[3] = (u8)(t >> 16); sample[4] = (u8)(t >> 24);
+    csprng_stir(sample, sizeof(sample));
     last_sc = sc;
     if (sc == 0xE0) { extended = 1; return; }
     if (extended) { extended = 0; return; } /* arrows etc: ignored */
