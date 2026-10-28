@@ -48,6 +48,7 @@ int wm_desktop_fileschmodtest(void);
 int wm_desktop_reporoottest(void);
 int wm_desktop_settingsunlocktest(void);
 int wm_desktop_unlocknousertest(void);
+int wm_desktop_fallbacktest(void);
 /* 1 (consumed on read) if the last desktop run ended on a confirmed
    Logout click; the shell performs the logout on return. */
 int wm_logout_requested(void);

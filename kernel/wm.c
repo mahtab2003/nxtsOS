@@ -76,6 +76,13 @@ static u32 desk_taskbar_col(void);
 static u32 desk_panel_col(void);
 static u32 desk_panel_text_col(void);
 static u32 desk_taskbar_text_col(void);
+/* Full desktop redraw, defined with the desktop section below
+   (forward-declared here because cursor_move_only's fallback
+   must redraw the active UI, not always the classic one). */
+static void desk_redraw(void);
+/* Desktop-active flag, defined with the desktop section below
+   (tentative definition; the initialised definition follows). */
+static int desk_active;
 
 int wm_count(void) {
     int n = 0;
@@ -418,7 +425,20 @@ static void cursor_move_only(s32 old_mx, s32 old_my, s32 new_mx, s32 new_my) {
     (void)old_mx; (void)old_my;
     if (!fb_ready()) return;
     if (!cursor_saved_valid || cursor_saved_x != old_mx || cursor_saved_y != old_my) {
-        wm_redraw();
+        /* Fallback redraw must match the active UI. The classic
+           redraw paints the old green background and no desktop
+           content, so falling back to it from the desktop loop
+           produced the v1.1.0 real-device "green screen + blank
+           windows" bug: with a real mouse, PS/2 interrupts move
+           the pointer between the loop's prev update and a
+           redraw's cursor save, so the mismatch is routine —
+           scripted injection never moves the pointer
+           mid-iteration, which is why sandbox tests never saw
+           it. A full desktop redraw repaints the theme
+           background, all window content, and the desk taskbar,
+           and re-saves the cursor at the current position. */
+        if (desk_active) desk_redraw();
+        else wm_redraw();
         return;
     }
     cursor_restore();
@@ -1762,7 +1782,7 @@ static void desk_draw_about_content(int idx, s32 dx, s32 dy, s32 dw, s32 dh) {
     struct window *wn = &wins[idx];
     s32 x = wn->x, y = wn->y;
     s32 cx = x + 1, cy = y + TITLE_H + 1, cw = wn->w - 2, ch = wn->h - TITLE_H - 2;
-    draw_text2(x + 10, y + 32, "nxtsOS v1.1.0", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    draw_text2(x + 10, y + 32, "nxtsOS v1.1.1", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
     draw_text2(x + 10, y + 52, "Original kernel, Multiboot, 32-bit x86.", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
     draw_text2(x + 10, y + 72, "Not a Linux distribution or fork.", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
     char buf[64];
@@ -3235,7 +3255,7 @@ static int wm_desktop_internal(int autotest) {
                 (autotest == 4 ? 21 : (autotest == 5 ? 243 :
                 (autotest == 6 ? 27 : (autotest == 7 ? 40 :
                 (autotest == 8 ? 3 : (autotest == 9 ? 15 :
-                (autotest == 10 ? 65 : (autotest == 11 ? 13 : (autotest == 12 ? 12 : (autotest == 13 ? 12 : (autotest == 14 ? 24 : (autotest == 15 ? 8 : (autotest == 16 ? 18 : (autotest == 17 ? 16 : (autotest == 18 ? 13 : (autotest == 19 ? 81 : (autotest == 20 ? 40 : (autotest == 21 ? 68 : (autotest == 22 ? 89 : (autotest == 23 ? 10 : (autotest == 24 ? 7 : (autotest == 25 ? 87 : (autotest == 26 ? 34 : (autotest == 27 ? 11 : (autotest == 28 ? 15 : (autotest == 29 ? 15 : 11)))))))))))))))))))))))))));
+                (autotest == 10 ? 65 : (autotest == 11 ? 13 : (autotest == 12 ? 12 : (autotest == 13 ? 12 : (autotest == 14 ? 24 : (autotest == 15 ? 8 : (autotest == 16 ? 18 : (autotest == 17 ? 16 : (autotest == 18 ? 13 : (autotest == 19 ? 81 : (autotest == 20 ? 40 : (autotest == 21 ? 68 : (autotest == 22 ? 89 : (autotest == 23 ? 10 : (autotest == 24 ? 7 : (autotest == 25 ? 87 : (autotest == 26 ? 34 : (autotest == 27 ? 11 : (autotest == 28 ? 15 : (autotest == 29 ? 15 : (autotest == 30 ? 7 : 11))))))))))))))))))))))))))));
             if (step != auto_step && step <= max_step) {
                 auto_step = step;
                 if (autotest == 4) {
@@ -4441,6 +4461,41 @@ static int wm_desktop_internal(int autotest) {
                     else if (step == 13) mouse_test_set(530, 300, 0);
                     else if (step == 14) mouse_test_set(48, 384, 1);
                     else if (step == 15) mouse_test_set(48, 384, 0);
+                } else if (autotest == 30) {
+                    /* Fallback-redraw script (v1.1.0 real-device
+                       green-screen bug), 30 ticks per step:
+                       0-1 Start; 2-3 Web row (300,432); 4 idle
+                       (window opens); 5 force the
+                       cursor_move_only fallback with a stale old
+                       position — exactly what a real PS/2 mouse
+                       produces when an interrupt moves the
+                       pointer between the loop's prev update and
+                       a redraw's cursor save — and sample the
+                       scene IN THE SAME STEP, before any clock
+                       refresh can repaint over it. Pre-fix the
+                       fallback ran the classic redraw: green
+                       background 0x00106040, classic taskbar,
+                       window frames without desktop content.
+                       Post-fix it runs a full desktop redraw:
+                       Classic background 0x00183050, zero green
+                       pixels, Web window present. */
+                    if (step == 0) mouse_test_set(32, 588, 1);
+                    else if (step == 1) mouse_test_set(32, 588, 0);
+                    else if (step == 2) mouse_test_set(300, 432, 1);
+                    else if (step == 3) mouse_test_set(300, 432, 0);
+                    else if (step == 5) {
+                        s32 sx = cursor_saved_x, sy = cursor_saved_y;
+                        cursor_move_only(0, 0, mouse_x(), mouse_y());
+                        u32 bg = fb_read_pixel(700, 300);
+                        u32 green = 0;
+                        for (s32 yy = 0; yy < 600; yy += 2)
+                            for (s32 xx = 0; xx < 800; xx += 2)
+                                if (fb_read_pixel(xx, yy) == 0x00106040u) green++;
+                        int web = 0;
+                        for (int i = 0; i < MAX_WINDOWS; i++)
+                            if (wins[i].used && wins[i].type == W_WEB) web = 1;
+                        console_printf("fb30: saved=(%d,%d) bg=0x%x green=%u web=%d\n", sx, sy, bg, green, web);
+                    }
                 } else if (autotest == 8) {
                     /* Phase 10 no-NIC script (boot with -nic
                        none): Start, Network. The open prints
@@ -6143,5 +6198,10 @@ int wm_desktop_settingsunlocktest(void) {
 int wm_desktop_unlocknousertest(void) {
     int rc = wm_desktop_internal(29);
     console_printf("desktopunlocknousertest returned (rc=%d)\n", rc);
+    return rc;
+}
+int wm_desktop_fallbacktest(void) {
+    int rc = wm_desktop_internal(30);
+    console_printf("desktopfallbacktest returned (rc=%d)\n", rc);
     return rc;
 }

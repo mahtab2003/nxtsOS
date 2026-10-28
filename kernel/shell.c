@@ -308,7 +308,7 @@ static int execute(char *line) {
     int n = tokenize(line, tok, &rest);
     if (n == 0) return 0;
     if (strcmp(tok[0], "help") == 0) {
-        console_write("Commands: help, mem, ticks, clear, reboot, fs, ls, cat <file>, write <file> <text>, rm <file>, mv <old> <new>, cp <src> <dst>, chmod <file> <mode>, run <file>, runbg <file>, jobs, kill <pid>, lock, unlock <user>, passwd [user], whoami, logout, idle [minutes|off], fbinfo, kbdstat, pkg list, pkg avail, pkg install <file>, pkg install <name>, pkg remove <name>, pkg remove <name> force, pkg repo [url], pkg update, pkg fetch <name>, sysupdate <bundle>, sysrollback, sha256 <file>, aes-test, gui, wmautotest, guitest, cursortest, cliptest, stormtest, desktop, desktopautotest, desktopsectest, desktopcalctest, desktop10test, desktopappstest, desktop10sec, desktopwebtest, desktopnonic, desktoprepotest, desktoprepoapptest, desktoppackageapptest, desktopfileinstalltest, desktopfileruntest, desktopmonitorjobtest, desktopreboottest, desktoplogouttest, desktopfilesysupdtest, desktoprollbacktest, desktopreposettest, desktopdnssettest, desktopnetpingtest, desktoprepofetchtest, desktopfileshashtest, desktopmonitordisktest, desktopwebsavetest, desktopfileschmodtest, desktopreporoottest, desktopsettingsunlocktest, desktopunlocknousertest, mouse, mousetest, mousepoll, netinfo, netdbg, dhcp, ping <ip>, dns <name>, dnsset <ip>, http <host> <path>, https <host> <path>, httpsa <host> <path>, nettest, hostmatch\n");
+        console_write("Commands: help, mem, ticks, clear, reboot, fs, ls, cat <file>, write <file> <text>, rm <file>, mv <old> <new>, cp <src> <dst>, chmod <file> <mode>, run <file>, runbg <file>, jobs, kill <pid>, lock, unlock <user>, passwd [user], whoami, logout, idle [minutes|off], fbinfo, kbdstat, pkg list, pkg avail, pkg install <file>, pkg install <name>, pkg remove <name>, pkg remove <name> force, pkg repo [url], pkg update, pkg fetch <name>, sysupdate <bundle>, sysrollback, sha256 <file>, aes-test, gui, wmautotest, guitest, cursortest, cliptest, stormtest, desktop, desktopautotest, desktopsectest, desktopcalctest, desktop10test, desktopappstest, desktop10sec, desktopwebtest, desktopnonic, desktoprepotest, desktoprepoapptest, desktoppackageapptest, desktopfileinstalltest, desktopfileruntest, desktopmonitorjobtest, desktopreboottest, desktoplogouttest, desktopfilesysupdtest, desktoprollbacktest, desktopreposettest, desktopdnssettest, desktopnetpingtest, desktoprepofetchtest, desktopfileshashtest, desktopmonitordisktest, desktopwebsavetest, desktopfileschmodtest, desktopreporoottest, desktopsettingsunlocktest, desktopunlocknousertest, desktopfallbacktest, mouse, mousetest, mousepoll, netinfo, netdbg, dhcp, ping <ip>, dns <name>, dnsset <ip>, http <host> <path>, https <host> <path>, httpsa <host> <path>, nettest, hostmatch\n");
     } else if (strcmp(tok[0], "idle") == 0) {
         if (n < 2) {
             if (idle_timeout_minutes == 0) console_write("Idle timeout: disabled (never locks on idle)\n");
@@ -671,6 +671,8 @@ static int execute(char *line) {
         wm_desktop_settingsunlocktest();
     } else if (strcmp(tok[0], "desktopunlocknousertest") == 0) {
         wm_desktop_unlocknousertest();
+    } else if (strcmp(tok[0], "desktopfallbacktest") == 0) {
+        wm_desktop_fallbacktest();
     } else if (strcmp(tok[0], "netinfo") == 0) {
         if (!net_present()) { console_write("net: no NIC\n"); return 0; }
         mac_t m; net_mac(&m);

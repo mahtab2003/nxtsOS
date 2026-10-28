@@ -8,6 +8,32 @@
 > contemporary notes, and no test result is claimed here beyond what
 > those reports record. Entries 0.1.0–0.2.0 are the original notes.
 
+## 1.1.1 — Patch release: three fixes for user-reported v1.1.0 bugs
+
+- TLS TOFU chain rule: a self-signed terminal was demanded, which
+  refused every real website (leaf + intermediate, root withheld).
+  TOFU now accepts a chain whose links all verify and whose terminal
+  is self-signed with a verifying self-signature or CA:true;
+  anchored mode (`httpsa`, repo HTTPS) unchanged.
+- Desktop fallback green repaint: `cursor_move_only`'s fallback ran
+  the classic redraw unconditionally from the desktop loop; with a
+  real PS/2 mouse it fired routinely and painted the classic green
+  background over the desktop. It now dispatches on the active UI.
+- Console cursor present: the framebuffer fast path drew cursor
+  cells into the back buffer without presenting (a v1.1.0 compositor
+  regression), so typed input and the cursor never reached a real
+  display. Both cursor cells are now presented (no-op in direct mode).
+- New suites: tls_chain (5/5), desktop_fallback (mode 30), shell_echo
+  (both boots), tls_ske (closes the v1.1.0 wrong-SKE-signature
+  NOT TESTED item). The "Calculator not installed" notification is
+  designed behaviour (calc is a package), not a bug.
+- Full sweep: Phase A (28 suites) + Phase B (43 + 4 new suites) all
+  PASS on the release ISO (5,390,336 bytes, kernel 266,400 bytes).
+  Bochs NOT re-run for v1.1.1 (last Bochs pass v0.10.0).
+- Still NOT tested at v1.1.1: user-side retest on real QEMU/KVM
+  (the key remaining live proof for all three fixes), live Vercel
+  guest fetch, Bochs re-run, real-pointer mouse, real hardware.
+
 ## 1.1.0 — Post-v1.0.0 accumulation: HTTPS, compositor, desktop/file polish, shell additions
 
 - TLS 1.2 client with ECDHE, ALPN, hostname matching, and pinned-anchor

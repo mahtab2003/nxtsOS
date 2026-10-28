@@ -104,6 +104,17 @@ void console_putchar(char ch) {
             fb_draw_char((s32)old_col * 8, (s32)old_row * 16, text_buf[old_row][old_col], 0x00FFFFFF, 0x00000000);
         if (cursor_row < ROWS && cursor_col < COLS)
             fb_draw_char((s32)cursor_col * 8, (s32)cursor_row * 16, text_buf[cursor_row][cursor_col], 0x00000000, 0x00FFFFFF);
+        /* Back-buffered mode: the two cells above land in the
+           shadow buffer only. Present them, or typed input and
+           the cursor never reach the screen (v1.1.0 real-device
+           bug: shell echo invisible in framebuffer text mode —
+           the pre-compositor direct-draw code needed no present,
+           this fast path was never updated for the back buffer).
+           No-op in direct mode (no back buffer). */
+        if (old_row < ROWS && old_col < COLS)
+            fb_present_rect((s32)old_col * 8, (s32)old_row * 16, 8, 16);
+        if (cursor_row < ROWS && cursor_col < COLS)
+            fb_present_rect((s32)cursor_col * 8, (s32)cursor_row * 16, 8, 16);
     } else {
         render_vga();
     }

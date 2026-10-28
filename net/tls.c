@@ -5,15 +5,21 @@
    X.509 chain verification, AES-128-GCM record protection.
    What it is NOT (stated plainly, because TLS security claims
    must not be inflated):
-   - Two trust modes. Default (`https`) is TOFU: a chain must
-     terminate in a self-signed root whose signature verifies
-     with its own key, whose dates are valid, and whose leaf
-     matches the requested host. That proves the certificate
-     is self-consistent, bound to the host, and that the
-     server holds the matching private key — but it is NOT CA
-     authentication: a man in the middle with their own
-     self-signed certificate for the same hostname would also
-     pass. Anchored mode (`httpsa`, and the repository client
+   - Two trust modes. Default (`https`) is TOFU: every link's
+     signature must verify with the next certificate's key,
+     dates must be valid, the leaf must match the requested
+     host, and the terminal certificate must either be
+     self-signed with a verifying self-signature (the
+     single-cert case) or a real CA (CA:true). Real servers
+     never send their root, so the terminal is normally an
+     intermediate — demanding a self-signed terminal refused
+     every real site (fixed after the v1.1.0 real-device
+     report: example.com always "certificate refused").
+     TOFU proves the chain is self-consistent, bound to the
+     host, and that the server holds the matching private
+     key — but it is NOT CA authentication: a man in the
+     middle with their own chain for the same hostname
+     would also pass. Anchored mode (`httpsa`, and the repository client
      over HTTPS) instead requires the terminal certificate's
      key to equal a pinned anchor: the compiled-in anchor
      (Google Trust Services WR1, which issues *.vercel.app)
@@ -758,17 +764,33 @@ static int verify_chain(const struct cert_info *certs, int count, const char *ho
        anchor key (CA-flagged; NOT self-signed — an intermediate
        like WR1 is issued by a root above it, whose 4096-bit key
        this 2048-bit kernel cannot verify, so the anchor IS the
-       trust root by pinning). TOFU mode keeps the old rule. */
+       trust root by pinning). TOFU mode trusts the presented
+       chain on first use: every link's signature must verify
+       (checked above), the leaf must match the host, dates
+       must hold — and the terminal must either be self-signed
+       with a verifying self-signature (the single-cert case,
+       rule unchanged) or a real CA (CA:true). Real servers
+       never send their root, so demanding a self-signed
+       terminal refused every real site (v1.1.0 real-device
+       bug: example.com always "certificate refused"). */
     const struct cert_info *root = &certs[count - 1];
     if (tls_verify_anchored) {
         if (root->ca_flag != 1) { return -1; }
         if (!tls_anchor_match(root)) { return -1; }
         return 0;
     }
-    if (root->issuer_len != root->subject_len) { return -1; }
-    if (memcmp(root->issuer, root->subject, root->issuer_len) != 0) { return -1; }
-    if (root->ca_flag == 0) { return -1; }
-    if (verify_signature(root, &root->modulus, root->exponent) != 0) { return -1; }
+    if (root->issuer_len == root->subject_len &&
+        memcmp(root->issuer, root->subject, root->issuer_len) == 0) {
+        /* Self-signed terminal: old rule, unchanged. */
+        if (root->ca_flag == 0) { return -1; }
+        if (verify_signature(root, &root->modulus, root->exponent) != 0) { return -1; }
+        return 0;
+    }
+    /* Intermediate terminal (the real-world case): it must be a
+       CA. Its own issuer's signature cannot be checked — the
+       root is not presented — which is exactly what TOFU
+       means: this chain is trusted on first use. */
+    if (root->ca_flag != 1) { return -1; }
     return 0;
 }
 

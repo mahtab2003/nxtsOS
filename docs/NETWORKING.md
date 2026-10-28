@@ -161,14 +161,19 @@ other failure returns -1 ("https: failed").
 anything against it):**
 
 - **Plain `https` is trust on first use (TOFU), NOT CA
-  authentication.** A chain must terminate in a
-  self-signed root whose signature verifies with its
-  own key, whose dates are valid, and whose leaf
-  matches the requested host. That proves
-  self-consistency, host binding, and private-key
-  possession — and nothing more. A man in the middle
-  with their own self-signed certificate for the same
-  hostname would also pass.
+  authentication.** Every link of the presented chain
+  must verify (each certificate signed by the next
+  one's key), dates must be valid, the leaf must match
+  the requested host, and the terminal certificate must
+  be either self-signed with a verifying self-signature
+  (the single-cert case) or CA-flagged (the real-world
+  case: leaf + intermediate, root never sent — fixed
+  after the v1.1.0 real-device report, where the old
+  self-signed-terminal-only rule refused every real
+  site). That proves self-consistency, host binding,
+  and private-key possession — and nothing more. A man
+  in the middle with their own validly-signed chain
+  for the same hostname would also pass.
 - **Anchored `httpsa` (Phase 12) pins a trust anchor
   instead.** The terminal certificate must be
   CA-flagged and its RSA-2048 key must equal a pinned

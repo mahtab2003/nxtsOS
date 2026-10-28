@@ -463,14 +463,13 @@ with test + security reports exists in `releases/`.
   device in sandbox); improvement is argued from pixel
   counts, not a phone fps number.
 
-Current release: **v1.1.0 = post-v1.0.0 extension: kernel HTTPS
-(TLS 1.2 ECDHE + pinned anchors + wildcard hostnames + repo
-over HTTPS), double-buffered glitch-free compositor, modern
-gold visual identity, desktop/file polish (Files copy/install/
-run/hash/chmod, Packages remove/rollback, Repo browser/fetch/
-set, Network DNS/ping, Monitor jobs/disk, Web save, Start
-Reboot/Logout), shell cp/mv/chmod/passwd/cat-range, and full
-docs audits**. Next: **post-v1.1.0 extension** per the standing
+Current release: **v1.1.1 = patch release over v1.1.0: three fixes
+for bugs the user found testing v1.1.0 on real QEMU/KVM — TLS TOFU
+chain rule (real sites no longer "certificate refused"), desktop
+fallback green repaint (fallback now dispatches on the active UI),
+console cursor present (typed input + cursor reach a real display)
+— plus mode-30 fallback autotest and tls_chain / desktop_fallback /
+shell_echo / tls_ske suites**. Next: **post-v1.1.1 extension** per the standing
 direction below (a due release must ship on its own as soon as
 work is release-worthy — never deferred behind audit/polish
 chunks, never waiting for the user to ask).
