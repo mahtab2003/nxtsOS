@@ -463,10 +463,17 @@ with test + security reports exists in `releases/`.
   device in sandbox); improvement is argued from pixel
   counts, not a phone fps number.
 
-Current release: **v1.0.0 = Phase 11 hardening, update and
-verified release**. Next: **post-v1.0.0 extension** (modern
-glitch-free UI pass, more desktop apps, more repository
-packages) per the standing direction below.
+Current release: **v1.1.0 = post-v1.0.0 extension: kernel HTTPS
+(TLS 1.2 ECDHE + pinned anchors + wildcard hostnames + repo
+over HTTPS), double-buffered glitch-free compositor, modern
+gold visual identity, desktop/file polish (Files copy/install/
+run/hash/chmod, Packages remove/rollback, Repo browser/fetch/
+set, Network DNS/ping, Monitor jobs/disk, Web save, Start
+Reboot/Logout), shell cp/mv/chmod/passwd/cat-range, and full
+docs audits**. Next: **post-v1.1.0 extension** per the standing
+direction below (a due release must ship on its own as soon as
+work is release-worthy — never deferred behind audit/polish
+chunks, never waiting for the user to ask).
 
 ## Standing direction (updated by the user 2026-10-27 — adds to
 all previous instructions, does not replace them)

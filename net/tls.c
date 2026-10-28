@@ -1,21 +1,37 @@
-/* TLS 1.2 client (Phase 9.2): one cipher suite,
+/* TLS 1.2 client (Phase 9.2): two cipher suites,
    TLS_RSA_WITH_AES_128_GCM_SHA256 (0x009C), RSA key exchange,
+   and ECDHE_RSA_WITH_AES_128_GCM_SHA256 (0xC02F), P-256
+   ECDHE with RSA-signed ServerKeyExchange (net/ec256.c),
    X.509 chain verification, AES-128-GCM record protection.
    What it is NOT (stated plainly, because TLS security claims
    must not be inflated):
-   - No CA trust store ships with nxtsOS. A chain must
+   - Two trust modes. Default (`https`) is TOFU: a chain must
      terminate in a self-signed root whose signature verifies
      with its own key, whose dates are valid, and whose leaf
      matches the requested host. That proves the certificate
      is self-consistent, bound to the host, and that the
-     server holds the matching private key — but it is TOFU
-     (trust on first use), not CA authentication: a man in
-     the middle with their own self-signed certificate for
-     the same hostname would also pass. A provisioned anchor
-     store is future work, not silently claimed here.
-   - No ECDHE, no session resumption, no ALPN, no wildcard
-     hostname matching (exact match only), no certificate
-     revocation checking, no TLS 1.3.
+     server holds the matching private key — but it is NOT CA
+     authentication: a man in the middle with their own
+     self-signed certificate for the same hostname would also
+     pass. Anchored mode (`httpsa`, and the repository client
+     over HTTPS) instead requires the terminal certificate's
+     key to equal a pinned anchor: the compiled-in anchor
+     (Google Trust Services WR1, which issues *.vercel.app)
+     or a modulus in root-owned tlsanchors.txt. The anchor
+     need not be self-signed — WR1 is issued by GTS Root R1,
+     whose 4096-bit key this 2048-bit kernel cannot verify,
+     so the pin IS the trust root by design. If the anchor
+     rotates, anchored handshakes fail closed until the
+     kernel carries the new anchor (re-run genanchor.py).
+   - No session resumption, no certificate
+     revocation checking, no TLS 1.3. ALPN sends http/1.1
+     only (the server's selection is not parsed); hostname
+     matching allows one left-label wildcard (*.example
+     matches foo.example, not example or a.b.example),
+     never for IP literals. ECDHE is P-256 only
+     (no X25519, no P-384); a ServerKeyExchange signature
+     that does not verify fails closed, never falling back
+     to RSA key exchange.
    - Randomness comes from a timer/MAC-seeded xorshift, NOT
      a cryptographic RNG: fine for lab tests, NOT for
      production secrecy (premaster/key randomness is only as
@@ -25,8 +41,12 @@
 #include "net.h"
 #include "bignum.h"
 #include "rsaverify.h"
+#include "ec256.h"
+#include "tls_anchor.h"
 #include "../kernel/sha256.h"
 #include "../kernel/aes.h"
+#include "../kernel/console.h"
+#include "../fs/vfs.h"
 #include "../drivers/pit.h"
 
 /* ---------- small helpers ---------- */
@@ -558,6 +578,80 @@ static int ascii_equal_nocase(const char *a, const char *b) {
     }
     return *a == *b;
 }
+/* Anchored verification (Phase 12): 1 = the terminal certificate
+   must be a pinned trust anchor, 0 = legacy TOFU (any self-signed
+   terminal certificate). Set by net_https_get_anchored (1) and
+   net_https_get (0) before the handshake; single connection at a
+   time, so no race. */
+static int tls_verify_anchored = 0;
+/* Does the terminal certificate's key equal a pinned anchor?
+   Anchors, tried in order (mirrors the package keyring model):
+   the compiled-in anchor (Google Trust Services WR1, which
+   issues *.vercel.app), then each well-formed line of the
+   root-owned tlsanchors.txt file (one 512-hex-char RSA-2048
+   modulus per line, exponent 65537). A missing anchor file is
+   not an error. The file MUST be root-owned and is a system
+   file (see fs/nxtsfs.c): a non-root user who could plant an
+   anchor could pin their own MITM key. Returns 1 on match. */
+static int tls_anchor_match(const struct cert_info *term) {
+    bn_t anchor;
+    if (term->exponent == TLS_ANCHOR_EXP &&
+        bn_from_be(&anchor, TLS_ANCHOR_MOD, 256) == 0 &&
+        bn_cmp(&anchor, &term->modulus) == 0) return 1;
+    static u8 abuf[8192];
+    u32 asize = 0;
+    if (fs_read("tlsanchors.txt", abuf, sizeof(abuf) - 1, &asize) != 0) return 0;
+    abuf[asize] = 0;
+    u32 pos = 0;
+    while (pos < asize) {
+        u32 ls = pos;
+        while (pos < asize && abuf[pos] != '\n') pos++;
+        u32 ll = pos - ls;
+        if (pos < asize) pos++;
+        if (ll == 0) continue;
+        if (ll != 512) { console_write("tls: skipping malformed anchor line\n"); continue; }
+        u8 mod[256];
+        int bad = 0;
+        for (int i = 0; i < 256; i++) {
+            char h0 = (char)abuf[ls + i * 2], h1 = (char)abuf[ls + i * 2 + 1];
+            int v0 = (h0 >= '0' && h0 <= '9') ? h0 - '0' :
+                     (h0 >= 'a' && h0 <= 'f') ? h0 - 'a' + 10 :
+                     (h0 >= 'A' && h0 <= 'F') ? h0 - 'A' + 10 : -1;
+            int v1 = (h1 >= '0' && h1 <= '9') ? h1 - '0' :
+                     (h1 >= 'a' && h1 <= 'f') ? h1 - 'a' + 10 :
+                     (h1 >= 'A' && h1 <= 'F') ? h1 - 'A' + 10 : -1;
+            if (v0 < 0 || v1 < 0) { bad = 1; break; }
+            mod[i] = (u8)((v0 << 4) | v1);
+        }
+        if (bad) { console_write("tls: skipping malformed anchor line\n"); continue; }
+        if (term->exponent == 65537u &&
+            bn_from_be(&anchor, mod, 256) == 0 &&
+            bn_cmp(&anchor, &term->modulus) == 0) return 1;
+    }
+    return 0;
+}
+/* DNS-name match with one left-label wildcard. Returns 1 on
+   match. "*.example" matches "foo.example" only: not "example"
+   itself, not "a.b.example" (the label must be non-empty and
+   contain no dot). Any other "*" placement is not a wildcard
+   and falls through to exact match (a literal "*" never
+   occurs in a real host, so this fails closed). Callers use
+   this for DNS names only, never for IP literals. */
+static int host_matches_name(const char *pattern, const char *host) {
+    if (pattern[0] == '*' && pattern[1] == '.') {
+        const char *suffix = pattern + 2;
+        if (!*suffix) return 0;
+        /* host must end with suffix, preceded by "." + one label. */
+        u32 slen = strlen(suffix), hlen = strlen(host);
+        if (hlen <= slen + 1) return 0; /* no room for label + dot */
+        if (!ascii_equal_nocase(host + hlen - slen, suffix)) return 0;
+        if (host[hlen - slen - 1] != '.') return 0;
+        for (u32 i = 0; i < hlen - slen - 1; i++)
+            if (host[i] == '.') return 0; /* multi-label: no match */
+        return 1;
+    }
+    return ascii_equal_nocase(pattern, host);
+}
 /* Hostname check for the leaf. Returns 0 on match. */
 static int verify_host(const struct cert_info *leaf, const char *host) {
     ip_t hip;
@@ -569,14 +663,76 @@ static int verify_host(const struct cert_info *leaf, const char *host) {
             return -1;
         }
         for (int i = 0; i < leaf->san_dns_count; i++)
-            if (ascii_equal_nocase(leaf->san_dns[i], host)) return 0;
+            if (host_matches_name(leaf->san_dns[i], host)) return 0;
         return -1; /* SAN present but no match: no CN fallback */
     }
     if (host_is_ip) {
-        /* No SAN: compare CN textually to the dotted host. */
+        /* No SAN: compare CN textually to the dotted host.
+           Wildcards never apply to IP literals. */
         return ascii_equal_nocase(leaf->cn, host) ? 0 : -1;
     }
-    return ascii_equal_nocase(leaf->cn, host) ? 0 : -1;
+    return host_matches_name(leaf->cn, host) ? 0 : -1;
+}
+/* Hostname self-test (shell `hostmatch`, nettest pattern).
+   Calls the real verify_host on fabricated leaf structs, so it
+   proves the matcher AND its call sites (SAN loop, CN
+   fallback, IP branch) without needing guest DNS — guest DNS
+   over slirp UDP is sandbox-blocked, so a live wildcard-SAN
+   handshake cannot run here (see AUTONOMOUS.md). Returns 0
+   when every case matches its expectation. The leaf is a
+   file-scope static: verify_host reads only has_san /
+   san_dns / san_ip / cn, and a cert_info on the 16 KiB
+   kernel stack would be gratuitous. */
+static struct cert_info hm_leaf;
+static void hm_set_name(char *dst, const char *src) {
+    int i = 0;
+    while (src[i] && i < 63) { dst[i] = src[i]; i++; }
+    dst[i] = 0;
+}
+static int hm_failures = 0;
+static void hm_check(int got, int want, const char *msg) {
+    if (got != want) {
+        console_printf("hostmatch FAIL: %s (got %d, want %d)\n", msg, got, want);
+        hm_failures++;
+    }
+}
+int tls_hostmatch_selftest(void) {
+    hm_failures = 0;
+    /* SAN wildcard cases. */
+    memset(&hm_leaf, 0, sizeof(hm_leaf));
+    hm_leaf.has_san = 1; hm_leaf.san_dns_count = 1;
+    hm_set_name(hm_leaf.san_dns[0], "*.wild.test");
+    hm_check(verify_host(&hm_leaf, "one.wild.test"), 0, "wildcard one label");
+    hm_check(verify_host(&hm_leaf, "wild.test"), -1, "wildcard bare domain");
+    hm_check(verify_host(&hm_leaf, "a.b.wild.test"), -1, "wildcard multi label");
+    hm_check(verify_host(&hm_leaf, "ONE.WILD.TEST"), 0, "wildcard case-insensitive");
+    hm_check(verify_host(&hm_leaf, "one.wild.test."), -1, "wildcard trailing dot");
+    hm_set_name(hm_leaf.san_dns[0], "other.test");
+    hm_check(verify_host(&hm_leaf, "one.wild.test"), -1, "exact mismatch");
+    hm_set_name(hm_leaf.san_dns[0], "wild.test");
+    hm_check(verify_host(&hm_leaf, "wild.test"), 0, "exact match still works");
+    hm_set_name(hm_leaf.san_dns[0], "*.");
+    hm_check(verify_host(&hm_leaf, "one.wild.test"), -1, "empty suffix");
+    hm_set_name(hm_leaf.san_dns[0], "foo.*.test");
+    hm_check(verify_host(&hm_leaf, "foo.bar.test"), -1, "mid-label star");
+    /* CN fallback cases (no SAN). */
+    memset(&hm_leaf, 0, sizeof(hm_leaf));
+    hm_set_name(hm_leaf.cn, "*.wild.test");
+    hm_check(verify_host(&hm_leaf, "one.wild.test"), 0, "CN wildcard");
+    hm_check(verify_host(&hm_leaf, "a.b.wild.test"), -1, "CN wildcard multi");
+    hm_set_name(hm_leaf.cn, "wild.test");
+    hm_check(verify_host(&hm_leaf, "10.0.2.2"), -1, "CN vs IP host");
+    /* IP branch cases. */
+    memset(&hm_leaf, 0, sizeof(hm_leaf));
+    hm_leaf.has_san = 1; hm_leaf.san_ip_count = 1;
+    hm_leaf.san_ip[0][0] = 10; hm_leaf.san_ip[0][1] = 0;
+    hm_leaf.san_ip[0][2] = 2; hm_leaf.san_ip[0][3] = 2;
+    hm_check(verify_host(&hm_leaf, "10.0.2.2"), 0, "SAN IP match");
+    hm_leaf.san_ip_count = 0; hm_leaf.san_dns_count = 1;
+    hm_set_name(hm_leaf.san_dns[0], "*.wild.test");
+    hm_check(verify_host(&hm_leaf, "10.0.2.2"), -1, "IP host never matches DNS SAN");
+    console_printf("hostmatch: %d failures\n", hm_failures);
+    return hm_failures == 0 ? 0 : -1;
 }
 /* Full chain verification. certs[0] is the leaf. Returns 0 or -1.
    -2 is reserved by the caller for certificate failures; this
@@ -598,8 +754,17 @@ static int verify_chain(const struct cert_info *certs, int count, const char *ho
         if (certs[i + 1].ca_flag != 1) return -1;
         if (verify_signature(&certs[i], &certs[i + 1].modulus, certs[i + 1].exponent) != 0) return -1;
     }
-    /* Last cert must be self-signed (TOFU root, see header). */
+    /* Terminal certificate: anchored mode requires a pinned
+       anchor key (CA-flagged; NOT self-signed — an intermediate
+       like WR1 is issued by a root above it, whose 4096-bit key
+       this 2048-bit kernel cannot verify, so the anchor IS the
+       trust root by pinning). TOFU mode keeps the old rule. */
     const struct cert_info *root = &certs[count - 1];
+    if (tls_verify_anchored) {
+        if (root->ca_flag != 1) { return -1; }
+        if (!tls_anchor_match(root)) { return -1; }
+        return 0;
+    }
     if (root->issuer_len != root->subject_len) { return -1; }
     if (memcmp(root->issuer, root->subject, root->issuer_len) != 0) { return -1; }
     if (root->ca_flag == 0) { return -1; }
@@ -623,6 +788,8 @@ static u32 tls_transcript_len = 0;
 static u8 tls_client_random[32], tls_server_random[32];
 static bn_t tls_leaf_mod;
 static u32 tls_leaf_exp = 0;
+static u16 tls_cipher_suite = 0;
+static u8 tls_peer_x[32], tls_peer_y[32]; /* ECDHE server point */
 static u8 tls_master[48];
 static u8 tls_client_key[16], tls_server_key[16];
 static u8 tls_client_iv[4], tls_server_iv[4];
@@ -774,7 +941,8 @@ static int tls_handshake(const char *host) {
     tls_rand(tls_client_random, 32);
     memcpy(hello + pos, tls_client_random, 32); pos += 32;
     hello[pos++] = 0; /* session id length */
-    tput16(hello + pos, 2); pos += 2;
+    tput16(hello + pos, 4); pos += 2;
+    tput16(hello + pos, 0xC02F); pos += 2; /* ECDHE-RSA AES-128-GCM SHA256 */
     tput16(hello + pos, 0x009C); pos += 2; /* RSA AES-128-GCM SHA256 */
     hello[pos++] = 1; /* compression methods length */
     hello[pos++] = 0; /* null compression */
@@ -808,6 +976,27 @@ static int tls_handshake(const char *host) {
     tput16(hello + pos, 2); pos += 2; /* list length */
     hello[pos++] = 0x04; /* SHA256 */
     hello[pos++] = 0x01; /* RSA */
+    /* supported_groups extension (type 10): secp256r1 only. */
+    tput16(hello + pos, 10); pos += 2;
+    tput16(hello + pos, 4); pos += 2; /* extension data length */
+    tput16(hello + pos, 2); pos += 2; /* list length */
+    tput16(hello + pos, 23); pos += 2; /* secp256r1 */
+    /* ec_point_formats extension (type 11): uncompressed only. */
+    tput16(hello + pos, 11); pos += 2;
+    tput16(hello + pos, 2); pos += 2; /* extension data length */
+    hello[pos++] = 1; /* list length */
+    hello[pos++] = 0; /* uncompressed */
+    /* ALPN extension (type 16): http/1.1 only. Layout: data
+       length 11 = list length (2) + name length (1) + 8 bytes.
+       The server's selected ALPN is not parsed (ServerHello
+       extensions are unparsed in this client); the client
+       speaks HTTP/1.1 regardless, so a server selecting
+       anything else fails at the HTTP layer, not silently. */
+    tput16(hello + pos, 16); pos += 2;
+    tput16(hello + pos, 11); pos += 2; /* extension data length */
+    tput16(hello + pos, 9); pos += 2; /* protocol list length */
+    hello[pos++] = 8; /* name length */
+    memcpy(hello + pos, "http/1.1", 8); pos += 8;
     tput16(hello + ext_len_field, (u16)(pos - ext_len_field - 2));
     if (tls_send_hs(1, hello, pos) != 0) return -1;
     /* ServerHello. (msg is a static buffer: an 8 KiB stack array
@@ -826,7 +1015,8 @@ static int tls_handshake(const char *host) {
     u32 sid_len = sh[spos++];
     if (spos + sid_len + 2 + 1 > sh_len) return -1;
     spos += sid_len;
-    if (tget16(sh + spos) != 0x009C) return -1; /* cipher suite */
+    tls_cipher_suite = tget16(sh + spos);
+    if (tls_cipher_suite != 0x009C && tls_cipher_suite != 0xC02F) return -1;
     spos += 2;
     if (sh[spos] != 0) return -1; /* compression must be null */
     if (transcript_append(msg, msg_len) != 0) return -1;
@@ -855,41 +1045,98 @@ static int tls_handshake(const char *host) {
     tls_leaf_mod = certs[0].modulus;
     tls_leaf_exp = certs[0].exponent;
     if (transcript_append(msg, msg_len) != 0) return -1;
+    /* ECDHE only: ServerKeyExchange, RSA-SHA256 signed over
+       client_random || server_random || params. A bad curve,
+       point, hash algorithm, or signature fails closed (-2,
+       never a fallback to RSA key exchange). */
+    if (tls_cipher_suite == 0xC02F) {
+        mtype = tls_next_hs(msg, 8192, &msg_len);
+        if (mtype != 12) return -1;
+        const u8 *sk = msg + 4;
+        u32 sk_len = msg_len - 4;
+        /* params = curve_type(1)=3, named_curve(2)=23,
+           pubkey_len(1)=65, pubkey(65) = 69 bytes. */
+        if (sk_len < 69 + 2 + 2) return -2;
+        if (sk[0] != 3 || tget16(sk + 1) != 23) return -2;
+        if (sk[3] != 65 || sk[4] != 0x04) return -2;
+        if (sk[69] != 0x04 || sk[70] != 0x01) return -2; /* SHA256+RSA */
+        u32 sig_len = tget16(sk + 71);
+        if (69 + 2 + 2 + sig_len != sk_len) return -2;
+        const u8 *sig = sk + 73;
+        memcpy(tls_peer_x, sk + 5, 32);
+        memcpy(tls_peer_y, sk + 37, 32);
+        if (p256_point_valid(tls_peer_x, tls_peer_y) != 0) return -2;
+        /* Signed message: client_random + server_random + params. */
+        u8 ske_msg[32 + 32 + 69];
+        memcpy(ske_msg, tls_client_random, 32);
+        memcpy(ske_msg + 32, tls_server_random, 32);
+        memcpy(ske_msg + 64, sk, 69);
+        int bl2 = bn_bitlen(&tls_leaf_mod);
+        u32 k2 = (u32)((bl2 + 7) / 8);
+        u8 mod_be[256];
+        if (k2 < 62 || k2 > 256) return -2;
+        if (bn_to_be(&tls_leaf_mod, mod_be, k2) != 0) return -2;
+        if (rsa_verify_sha256(mod_be, k2, tls_leaf_exp,
+                              sig, sig_len, ske_msg, sizeof(ske_msg)) != 0) return -2;
+        if (transcript_append(msg, msg_len) != 0) return -1;
+    }
     /* ServerHelloDone (may share a record with Certificate in
        theory; the stream parser already handles that). */
     mtype = tls_next_hs(msg, 8192, &msg_len);
     if (mtype != 14) { return -1; }
     if (transcript_append(msg, msg_len) != 0) return -1;
-    /* ClientKeyExchange: RSA-encrypted premaster. */
+    /* ClientKeyExchange + premaster. ECDHE: the premaster is
+       the ECDH shared x coordinate (32 bytes, no version
+       prefix); RSA: the classic 48-byte versioned premaster. */
     u8 premaster[48];
-    premaster[0] = 0x03; premaster[1] = 0x03;
-    tls_rand(premaster + 2, 46);
-    int bl = bn_bitlen(&tls_leaf_mod);
-    u32 k = (u32)((bl + 7) / 8);
-    if (k < 48 + 11 || k > 256) return -1;
-    u8 em[256];
-    em[0] = 0x00; em[1] = 0x02;
-    for (u32 i = 2; i < k - 48 - 1; i++) {
-        u8 r;
-        do { tls_rand(&r, 1); } while (r == 0);
-        em[i] = r;
+    u32 premaster_len = 48;
+    if (tls_cipher_suite == 0xC02F) {
+        u8 priv[32], pub_x[32], pub_y[32], shared[32];
+        int ok = 0;
+        for (int attempt = 0; attempt < 4 && !ok; attempt++) {
+            tls_rand(priv, 32);
+            if (p256_pub_from_priv(priv, pub_x, pub_y) == 0) ok = 1;
+        }
+        if (!ok) return -1;
+        if (p256_ecdh(priv, tls_peer_x, tls_peer_y, shared) != 0) return -1;
+        memcpy(premaster, shared, 32);
+        premaster_len = 32;
+        u8 ckx[66];
+        ckx[0] = 65;
+        ckx[1] = 0x04;
+        memcpy(ckx + 2, pub_x, 32);
+        memcpy(ckx + 34, pub_y, 32);
+        if (tls_send_hs(16, ckx, 66) != 0) { return -1; }
+    } else {
+        premaster[0] = 0x03; premaster[1] = 0x03;
+        tls_rand(premaster + 2, 46);
+        int bl = bn_bitlen(&tls_leaf_mod);
+        u32 k = (u32)((bl + 7) / 8);
+        if (k < 48 + 11 || k > 256) return -1;
+        u8 em[256];
+        em[0] = 0x00; em[1] = 0x02;
+        for (u32 i = 2; i < k - 48 - 1; i++) {
+            u8 r;
+            do { tls_rand(&r, 1); } while (r == 0);
+            em[i] = r;
+        }
+        em[k - 48 - 1] = 0x00;
+        memcpy(em + k - 48, premaster, 48);
+        bn_t em_bn, ct_bn;
+        if (bn_from_be(&em_bn, em, k) != 0) return -1;
+        if (bn_modexp(&ct_bn, &em_bn, tls_leaf_exp, &tls_leaf_mod) != 0) return -1;
+        u8 ct[256];
+        if (bn_to_be(&ct_bn, ct, k) != 0) return -1;
+        u8 ckx[512];
+        tput16(ckx, (u16)k);
+        memcpy(ckx + 2, ct, k);
+        if (tls_send_hs(16, ckx, k + 2) != 0) { return -1; }
     }
-    em[k - 48 - 1] = 0x00;
-    memcpy(em + k - 48, premaster, 48);
-    bn_t em_bn, ct_bn;
-    if (bn_from_be(&em_bn, em, k) != 0) return -1;
-    if (bn_modexp(&ct_bn, &em_bn, tls_leaf_exp, &tls_leaf_mod) != 0) return -1;
-    u8 ct[256];
-    if (bn_to_be(&ct_bn, ct, k) != 0) return -1;
-    u8 ckx[512];
-    tput16(ckx, (u16)k);
-    memcpy(ckx + 2, ct, k);
-    if (tls_send_hs(16, ckx, k + 2) != 0) { return -1; }
     /* Master secret + key block. */
     u8 seed_ms[64];
     memcpy(seed_ms, tls_client_random, 32);
     memcpy(seed_ms + 32, tls_server_random, 32);
-    tls_prf(premaster, 48, "master secret", seed_ms, 64, tls_master, 48);
+    tls_prf(premaster, premaster_len, "master secret", seed_ms, 64, tls_master, 48);
     u8 seed_ke[64];
     memcpy(seed_ke, tls_server_random, 32);
     memcpy(seed_ke + 32, tls_client_random, 32);
@@ -971,7 +1218,7 @@ static int tls_recv_app(u8 *buf, u32 max) {
     memcpy(buf, tls_rec_buf, rec_len);
     return (int)rec_len;
 }
-int net_https_get(const char *host, u16 port, const char *path, char *buf, u32 max) {
+static int https_get_inner(const char *host, u16 port, const char *path, char *buf, u32 max) {
     if (max < 2) return -1;
     ip_t hip;
     if (!net_parse_ip(host, &hip)) {
@@ -1051,4 +1298,12 @@ int net_https_get(const char *host, u16 port, const char *path, char *buf, u32 m
     memmove(buf, buf + header_end, body_len);
     buf[body_len] = 0;
     return (int)body_len;
+}
+int net_https_get(const char *host, u16 port, const char *path, char *buf, u32 max) {
+    tls_verify_anchored = 0;
+    return https_get_inner(host, port, path, buf, max);
+}
+int net_https_get_anchored(const char *host, u16 port, const char *path, char *buf, u32 max) {
+    tls_verify_anchored = 1;
+    return https_get_inner(host, port, path, buf, max);
 }

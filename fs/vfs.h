@@ -16,11 +16,16 @@ int  fs_enum_as(u32 uid, char names[][32], u32 sizes[], int max); /* fill names/
 int  fs_list_as(u32 uid);
 int  fs_read(const char *name, u8 *buf, u32 buf_size, u32 *out_size);
 int  fs_read_as(const char *name, u8 *buf, u32 buf_size, u32 *out_size, u32 uid);
+int  fs_read_range_as(const char *name, u8 *buf, u32 buf_size, u32 offset, u32 *out_size, u32 uid); /* windowed read: same lookup + permission check as fs_read_as, but up to buf_size bytes starting at offset; 0 bytes at end of file */
 int  fs_write(const char *name, const u8 *data, u32 len, u32 uid, u32 mode);
 int  fs_write_as(const char *name, const u8 *data, u32 len, u32 uid, u32 mode);
 int  fs_delete(const char *name);
 int  fs_delete_as(const char *name, u32 uid);
+int  fs_rename_as(const char *oldname, const char *newname, u32 uid); /* metadata-only rename: same entry, same uid/mode/data */
+int  fs_chmod_as(const char *name, u32 mode, u32 uid); /* metadata-only mode change: root or owner only, mode <= 0777 */
+int  fs_copy_as(const char *srcname, const char *dstname, u32 uid); /* byte-exact copy: new entry owned by the caller, source mode kept */
 int  fs_exists(const char *name); /* 1 if a valid entry exists, else 0 */
 int  fs_append(const char *name, const u8 *data, u32 len); /* root-only, audit log */
 u32  fs_free_sectors(void);
+u32  fs_total_sectors(void); /* 0 when not mounted, like fs_free_sectors */
 #endif

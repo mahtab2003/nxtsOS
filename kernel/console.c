@@ -36,6 +36,9 @@ static void render_fb(void) {
         char ch = text_buf[cursor_row][cursor_col];
         fb_draw_char((s32)cursor_col * 8, (s32)cursor_row * 16, ch, 0x00000000, 0x00FFFFFF);
     }
+    /* Text console in graphics mode is also a scene: present it
+       whole, so the shell never shows a half-rendered screen. */
+    fb_present();
 }
 
 void console_init(void) {

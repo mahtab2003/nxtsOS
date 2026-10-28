@@ -4,9 +4,17 @@
 
 Phase 7: a real graphics mode, a font, a mouse driver, and a window
 manager — all in the kernel, all verified in QEMU. This is the
-foundation for the Phase 8 desktop shell, not the desktop itself:
-there is no graphical login, no settings app, and no user GUI
-programs yet (those are Phase 8, as packages).
+foundation for the Phase 8 desktop shell, not the desktop itself.
+CORRECTION (post-v1.0.0): the Phase 7 sentence that followed here
+— "there is no graphical login, no settings app, and no user GUI
+programs yet (those are Phase 8, as packages)" — is no longer true.
+The desktop shell exists (see docs/DESKTOP.md) with a graphical lock
+screen, a Settings app, and user GUI programs shipped as packages
+(calc, term in userland/, built to build/calc.nxpkg and
+build/term.nxpkg). What this document still describes below is the
+Phase 7 foundation itself: the graphics mode, font, mouse driver,
+and the demo window manager (shell `gui`), which still exists
+alongside the `desktop` shell.
 
 ## Graphics mode
 
@@ -53,12 +61,15 @@ The console keeps a RAM text buffer (80x25) and renders it to
 either VGA text memory or, after `fb_init()`, to the framebuffer
 with an 8x16 bitmap font. Early boot logs are buffered in RAM and
 appear on screen in graphics mode too, after the framebuffer is
-mapped. The font is generated at build time from the host's
-standard console font (`tools/genfont.py`, default
-Lat15-VGA16.psf.gz, 256 glyphs, MSB = leftmost pixel); the
-generated `kernel/font_data.h` is committed so builds do not need
-the host font. The font data itself is a standard console font,
-not nxtsOS original code.
+mapped. The font is generated from the host's standard console
+font by running `tools/genfont.py` (default Lat15-VGA16.psf.gz,
+256 glyphs, MSB = leftmost pixel) — it is not a build step: no
+build script runs genfont, and the generated `kernel/font_data.h`
+is committed so builds do not need the host font. CORRECTION
+(post-v1.0.0): the previous wording here — "generated at build
+time" — overstated this; the header is generated once by hand
+and committed, and builds never regenerate it. The font data
+itself is a standard console font, not nxtsOS original code.
 
 ## Mouse
 
@@ -73,7 +84,11 @@ and IRQ12, which text-mode-only kernels did not need.
 
 ## Window manager
 
-In-kernel demo windows, drawn directly to the framebuffer with
+This section describes the demo window manager (shell `gui`,
+`wm_run()`), not the desktop shell (shell `desktop`, see
+docs/DESKTOP.md): the taskbar "Shell" button and the "Back to shell"
+button below belong to the demo manager. In-kernel demo windows,
+drawn directly to the framebuffer with
 clipping — no per-window pixel buffers, so a huge window cannot
 exhaust memory; it is clamped to the screen instead. Features:
 move (drag title bar), resize (drag bottom-right corner),
@@ -89,7 +104,17 @@ the text console is redrawn), `guitest` (non-interactive edge
 cases), `wmautotest` (scripted click/drag/taskbar test),
 `mousetest` (PS/2 packet parsing, clamping, overflow), `mouse`
 (print current mouse state), `mousepoll` (diagnostic: poll the
-controller for bytes, used while diagnosing QEMU mouse injection).
+controller for bytes, used while diagnosing QEMU mouse injection),
+`stormtest` (compositor redraw-correctness storm: 40 deterministic
+rounds of open/move/close/minimise-restore, each followed by the
+cliptest invariant — a clip redraw of the dirty union must leave
+exactly the pixels a full redraw leaves; prints "stormtest: 40
+rounds, N clip/full checks, fails=M" plus `stormtest PASS`/`FAIL`.
+Any tearing, stale-rect, or partial-frame bug in the clip path
+shows up as a checksum mismatch here, while a correct compositor
+passes every round. The System window stays minimised throughout,
+since its ticks text changes every 10 ms and would differ between
+two checksums even with a correct redraw).
 
 ## v0.7.1 fix: GUI in Bochs (and other emulators where GRUB sets no mode)
 
@@ -118,7 +143,11 @@ start at all. Three changes, all verified in QEMU:
    QEMU's std VGA is Bochs-compatible, so this is strong evidence
    the fallback works in Bochs too, but Bochs itself is NOT
    installed in this sandbox — the user must confirm `gui` starts
-   in Bochs on v0.7.1.
+   in Bochs on v0.7.1. SUPERSEDED: see the v0.7.2 section directly
+   below — Bochs 2.7 was installed in the sandbox, `guitest PASS`
+   was proven in Bochs there, and Bochs is installed and used for
+   desktop tests in later releases too, so this confirmation is
+   no longer outstanding.
 3. **Diagnosis.** New shell command `fbinfo` prints the
    framebuffer status and, when absent, the reason GRUB failed
    (no info flag, unsupported bpp/type, bad address/dimensions,
@@ -148,20 +177,46 @@ injected via xdotool under Xvfb/SDL2):
   the prompt, not during boot.
 - **cirrus + cirrus VGABIOS:** kernel VBE fallback correctly
   fails ("no Bochs VBE device (ID check failed)" — Cirrus has no
-  Bochs VBE ports), and GRUB's BIOS VBE path gives garbage
-  framebuffer info in Bochs+SeaBIOS (bpp=1 type=0, with and
-  without `insmod vbe`), which the kernel correctly rejects.
-  Cirrus cannot be fixed in the kernel for 800x600x32: there is
-  no Bochs-port path and no usable BIOS path in this Bochs build.
-  Use the shipped bochsrc (vbe) instead.
-- **isavga (Bochs' default VGABIOS):** no VBE at all, same ID
-  failure, same conclusion: use the shipped bochsrc (vbe).
+  Bochs VBE ports), and GRUB passes no framebuffer info at all
+  (flag 12 clear, bpp=-1 type=-1) on this Bochs 2.7 + SeaBIOS
+  build, with and without `insmod vbe` in grub.cfg — so the GUI
+  fails at the ID check, and `guitest` reports "no framebuffer
+  available". Cirrus cannot be fixed in the kernel for
+  800x600x32: there is no Bochs-port path and no usable BIOS
+  path in this Bochs build. Use the shipped bochsrc (vbe)
+  instead. CORRECTION (2026-10-28): an earlier version of this
+  bullet said GRUB's BIOS VBE path gave garbage framebuffer info
+  (bpp=1 type=0); that was not reproduced on the current build —
+  GRUB passes no info, in both GRUB configurations — so the
+  sentence now states the observed behaviour. The fb_parse
+  bpp/type rejection still stands as code, but the live cirrus
+  path fails earlier, at the ID check.
+- **isavga (Bochs' default VGABIOS):** CORRECTION (2026-10-28):
+  the earlier claim that isavga gives the same ID failure is
+  WRONG on the current build, and is withdrawn. Re-run live
+  2026-10-28 on Bochs 2.7 + current kernel, both with the isavga
+  VGABIOS explicitly and with Bochs' pure defaults (no `vga:`
+  line, no `vgaromimage:` line): Bochs enables the VBE extension
+  by default in both cases ("VBE Bochs Display Extension
+  Enabled" in bochs.log, ID 0xB0C2), GRUB passes no framebuffer
+  info (flag 12 clear), and the kernel's ISA fallback brings up
+  "Framebuffer: 800x600, pitch 3200, phys 0xE0000000 (VBE
+  fallback)" with `guitest PASS`. The VBE IO ports come from
+  Bochs' VGA device (extension defaults to vbe), not from the
+  VGABIOS — the VGABIOS only matters for GRUB's BIOS path, and
+  GRUB passes no info either way, so the kernel fallback carries
+  the GUI. The shipped bochsrc (vbe + stdvga) stays the
+  supported config, but isavga is NOT a cannot-run-the-GUI
+  config; only the cirrus device is.
 
 So the Bochs rule is now proven, not guessed: **use
 `vga: extension=vbe` with a stdvga VGABIOS** (the shipped
-bochsrc). Bochs' default isavga and cirrus configs cannot run
-the GUI, in any kernel version, because they provide no usable
-graphics-mode path for 800x600x32 in Bochs 2.7 + SeaBIOS.
+bochsrc). The cirrus device cannot run the GUI, in any kernel
+version, because it provides no usable graphics-mode path for
+800x600x32 in Bochs 2.7 + SeaBIOS (no Bochs VBE ports, and GRUB
+passes no mode info). The isavga VGABIOS, by contrast, works
+via the kernel's VBE fallback (see the correction above) — it
+is simply not the shipped/supported config.
 
 ## Keyboard in Bochs (v0.7.2)
 
@@ -188,7 +243,9 @@ QEMU monitor `mouse_move`/`mouse_button`, `mouse_set`, and VNC
 PointerEvent messages were all tried (with `-display none`, VNC,
 and `-vga std`), and none delivered a single PS/2 packet to the
 guest — proven by polling the controller (`mousepoll` saw no
-bytes) and by a serial debug log in the IRQ handler (no packets).
+bytes) and by a serial debug log in a temporarily instrumented
+IRQ handler (no packets; that log is not in the shipped handler,
+which only feeds the byte to the driver).
 The mouse driver itself is proven: `mousetest` feeds known packets
 directly to the driver's packet assembly and checks position,
 clamping, overflow, and buttons, all PASS. The window manager's
@@ -202,9 +259,19 @@ machine (QEMU with a display, or VirtualBox) and report what
 happens; that is the one Phase 7 interaction that still needs a
 real-device check.
 
-Also not in Phase 7: graphical login/desktop shell (Phase 8),
-user GUI programs via syscalls (Phase 8, as packages), mouse
-wheel/scroll, and a second mouse button menu. A button press,
+Two items from the Phase 7 list have since arrived and are now
+covered by the desktop tests: the desktop shell (with its
+graphical lock screen, shell `desktop`) and user GUI programs
+as packages (calc, term, built to build/calc.nxpkg and
+build/term.nxpkg). Still genuinely missing: mouse wheel/scroll
+(no wheel code anywhere in the tree) and a second mouse button
+menu (the driver tracks mouse_right(), but no window-manager or
+desktop code consumes it — only shell `mouse` prints it).
+CORRECTION: this paragraph used to list the desktop shell and
+user GUI programs alongside wheel/scroll and the second-button
+menu as "not in Phase 7" items under a present-tense NOT-tested
+heading; the first two are delivered and tested now, so they no
+longer belong in that list. A button press,
 dragged off the button, and released elsewhere does NOT trigger
 the button (fixed during autotest development — the first version
 triggered on release regardless of position).

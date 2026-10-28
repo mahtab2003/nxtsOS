@@ -48,7 +48,15 @@ gcc -m32 -ffreestanding -O0 -Wall -Wextra -fno-stack-protector -fno-pic -fno-pie
     -c userland/term.c -o build/term_main.o
 gcc -m32 -no-pie -Wl,--build-id=none -T userland/linker.ld -nostdlib \
     -o build/term.elf build/user_start.o build/term_main.o
-ls -l build/hello.elf build/evil.elf build/slow.elf build/greet.elf build/hello2.elf build/calc.elf build/term.elf build/guibad.elf
+gcc -m32 -ffreestanding -O0 -Wall -Wextra -fno-stack-protector -fno-pic -fno-pie -no-pie -nostdlib \
+    -c userland/bench.c -o build/bench_main.o
+gcc -m32 -no-pie -Wl,--build-id=none -T userland/linker.ld -nostdlib \
+    -o build/bench.elf build/user_start.o build/bench_main.o
+gcc -m32 -ffreestanding -O0 -Wall -Wextra -fno-stack-protector -fno-pic -fno-pie -no-pie -nostdlib \
+    -c userland/sysinfo.c -o build/sysinfo_main.o
+gcc -m32 -no-pie -Wl,--build-id=none -T userland/linker.ld -nostdlib \
+    -o build/sysinfo.elf build/user_start.o build/sysinfo_main.o
+ls -l build/hello.elf build/evil.elf build/slow.elf build/greet.elf build/hello2.elf build/calc.elf build/term.elf build/guibad.elf build/bench.elf build/sysinfo.elf
 # Vendor signing key (Phase 11): generated ONCE and kept in build/
 # (git-ignored, never archived). Deleting it creates a new keypair,
 # which invalidates every previously signed package — the kernel
@@ -65,6 +73,14 @@ python3 tools/mkpkg.py build/calc.nxpkg --name calc --version 1.0 --file calc.el
 # Console package (Phase 10): same rule — do not pre-seed a plain
 # term.elf on a disk that also carries term.nxpkg.
 python3 tools/mkpkg.py build/term.nxpkg --name term --version 1.0 --file term.elf:build/term.elf --sign-key build/signing.key
+# Benchmark package (post-v1.0.0, 6(c)): same rule — do not
+# pre-seed a plain bench.elf on a disk that also carries
+# bench.nxpkg.
+python3 tools/mkpkg.py build/bench.nxpkg --name bench --version 1.0 --file bench.elf:build/bench.elf --sign-key build/signing.key
+# System-information package (post-v1.0.0, 6(c) part 2):
+# same rule — do not pre-seed a plain sysinfo.elf on a disk
+# that also carries sysinfo.nxpkg.
+python3 tools/mkpkg.py build/sysinfo.nxpkg --name sysinfo --version 1.0 --file sysinfo.elf:build/sysinfo.elf --sign-key build/signing.key
 # Embed the vendor public key into the kernel (regenerated every
 # build from the same key, so it can never drift from the signer).
 python3 tools/genvendorpub.py build/signing.key kernel/vendor_pubkey.h
@@ -85,7 +101,7 @@ for f in kernel/util.c kernel/console.c kernel/panic.c kernel/shell.c kernel/mai
          kernel/proc.c kernel/syscall.c kernel/users.c kernel/elf.c kernel/sha256.c kernel/pkg.c kernel/aes.c kernel/enc.c kernel/fb.c kernel/wm.c \
          drivers/serial.c drivers/idt.c drivers/pic.c drivers/pit.c drivers/keyboard.c drivers/mouse.c \
          drivers/gdt.c drivers/ata.c fs/nxtsfs.c mm/pmm.c mm/vmm.c \
-         net/e1000.c net/net.c net/tcp.c net/tls.c net/nettest.c net/bignum.c net/rsaverify.c; do
+         net/e1000.c net/net.c net/tcp.c net/tls.c net/nettest.c net/bignum.c net/rsaverify.c net/ec256.c; do
     o="build/$(basename "$f" .c).o"
     echo "cc $f -> $o"
     gcc $CFLAGS -c "$f" -o "$o"
@@ -98,7 +114,7 @@ gcc -m32 -no-pie -Wl,--build-id=none -T boot/linker.ld -nostdlib -o build/nxtsOS
     build/user_blob.o build/util.o build/console.o build/panic.o \
     build/shell.o build/main.o build/proc.o build/syscall.o build/users.o build/elf.o build/sha256.o build/pkg.o build/aes.o build/enc.o build/fb.o build/wm.o build/serial.o build/idt.o \
     build/pic.o build/pit.o build/keyboard.o build/mouse.o build/gdt.o build/ata.o build/nxtsfs.o build/pmm.o build/vmm.o \
-    build/e1000.o build/net.o build/tcp.o build/tls.o build/nettest.o build/bignum.o build/rsaverify.o
+    build/e1000.o build/net.o build/tcp.o build/tls.o build/nettest.o build/bignum.o build/rsaverify.o build/ec256.o
 ls -l build/nxtsOS.bin
 if command -v grub-file >/dev/null 2>&1; then
     grub-file --is-x86-multiboot build/nxtsOS.bin && echo "grub-file: multiboot OK"

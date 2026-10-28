@@ -1,10 +1,18 @@
 #include "fb.h"
 #include "font_data.h"
 #include "../mm/vmm.h"
+#include "../mm/pmm.h"
 
 static int ready = 0;
 static u32 width = 0, height = 0, pitch = 0, phys = 0;
-static u32 *fb = 0; /* virtual address FB_VIRT, 32bpp pixels */
+static u32 *fb = 0; /* DRAW target: the back buffer once allocated,
+   the hardware framebuffer itself if back-buffer allocation
+   failed (direct fallback, pre-v1.1 behaviour). All fb_* drawing
+   and reading functions use this pointer, so scene state is
+   always self-consistent whether or not a back buffer exists. */
+static u32 *fb_vis = 0; /* hardware framebuffer at FB_VIRT, the
+   only pointer the display hardware (and a QEMU screendump)
+   ever sees. Nothing draws to it except fb_present_rect. */
 /* Diagnostics for `fbinfo`: what GRUB actually passed, so a "no
    framebuffer" report can be diagnosed instead of guessed at. */
 static const char *diag_reason = "not parsed";
@@ -111,14 +119,14 @@ int fb_vbe_try(void) {
     return 0;
 }
 
-void fb_disable(void) { ready = 0; fb = 0; }
+void fb_disable(void) { ready = 0; fb = 0; fb_vis = 0; }
 void fb_vbe_disable(void) { vbe_write(4, 0); }
 int fb_verify(void) {
-    if (!ready) return -1;
-    u32 saved = fb[0];
-    fb[0] = 0x00AABBCCu;
-    u32 back = fb[0];
-    fb[0] = saved;
+    if (!ready || !fb_vis) return -1;
+    u32 saved = fb_vis[0];
+    fb_vis[0] = 0x00AABBCCu;
+    u32 back = fb_vis[0];
+    fb_vis[0] = saved;
     return back == 0x00AABBCCu ? 0 : -1;
 }
 
@@ -128,9 +136,36 @@ int fb_init(void) {
     u32 bytes = pitch * height;
     for (u32 off = 0; off < bytes; off += 4096)
         vmm_map_page(vmm_kernel_pd(), FB_VIRT + off, phys + off, PAGE_RW);
+    /* Back buffer (post-v1.0.0, queue item 6a): allocate one
+       framebuffer-sized shadow buffer from PMM frames and map it
+       immediately after the hardware framebuffer, INSIDE the same
+       4 MB page-directory entry (0x40000000-0x40400000) that
+       vmm_create_pd shares into user PDs — so kernel code in
+       syscall context (user PD active) can draw to it exactly
+       like it could to the hardware framebuffer. Every draw lands
+       in the shadow and only fb_present_rect() copies finished
+       rectangles to the visible framebuffer, so a screendump (or
+       a real display scan) can never catch a half-drawn window,
+       drag, or text update — no tearing, flicker, or partial
+       frames. This runs after pmm_init/vmm_init in main.c, so
+       frames are available. If the shadow does not fit in the
+       shared entry (a mode much larger than 800x600) or
+       allocation fails, fall back to drawing directly to the
+       hardware framebuffer (old behaviour): a missing back
+       buffer must degrade the glitch guarantee, never the boot. */
+    int shadow_ok = 1;
+    u32 fb_pages = (bytes + 4095u) / 4096u;
+    u32 shadow_base = FB_VIRT + fb_pages * 4096u;
+    if (shadow_base + bytes > FB_VIRT + 0x400000u) shadow_ok = 0;
+    for (u32 i = 0; shadow_ok && i < fb_pages; i++) {
+        u32 fr = pmm_alloc_frame();
+        if (fr == 0) { shadow_ok = 0; break; }
+        vmm_map_page(vmm_kernel_pd(), shadow_base + i * 4096u, fr, PAGE_RW);
+    }
     /* Flush the TLB so the new mappings are visible. */
     vmm_enable_paging(vmm_kernel_pd());
-    fb = (u32 *)FB_VIRT;
+    fb_vis = (u32 *)FB_VIRT;
+    fb = shadow_ok ? (u32 *)shadow_base : fb_vis;
     ready = 1;
     return 0;
 }
@@ -245,4 +280,29 @@ u32 fb_checksum(void) {
     u32 sum = 0;
     for (u32 i = 0; i < width * height; i++) sum += fb[i] * 31u + 1u;
     return sum;
+}
+
+/* Copy a finished rectangle from the back buffer to the visible
+   framebuffer. This is the ONLY write path to fb_vis, and the
+   only moment the visible frame changes — a redraw is therefore
+   atomic as far as any observer (display scan, screendump) is
+   concerned. No-op in direct mode (no back buffer). */
+void fb_present_rect(s32 x, s32 y, s32 w, s32 h) {
+    if (!ready || !fb_vis || fb == fb_vis) return;
+    s32 x0 = x, y0 = y, x1 = x + w, y1 = y + h;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > (s32)width) x1 = (s32)width;
+    if (y1 > (s32)height) y1 = (s32)height;
+    if (x0 >= x1 || y0 >= y1) return;
+    u32 row_stride = pitch / 4;
+    for (s32 yy = y0; yy < y1; yy++) {
+        u32 *dst = fb_vis + (u32)yy * row_stride + (u32)x0;
+        u32 *src = fb + (u32)yy * row_stride + (u32)x0;
+        for (s32 xx = x0; xx < x1; xx++) *dst++ = *src++;
+    }
+}
+
+void fb_present(void) {
+    fb_present_rect(0, 0, (s32)width, (s32)height);
 }

@@ -36,6 +36,10 @@ int  proc_bg_kill(u32 pid, u32 uid); /* 0 ok, -1 no such job / no permission */
 int  proc_bg_kill_for_uid(u32 uid);  /* logout cleanup, returns count killed */
 int  proc_bg_count(void);
 int  proc_bg_exists(u32 pid); /* 1 if a background job with this pid is still alive */
+/* nth used job in slot order (0 ok, -1 none): the Monitor window's
+   jobs list reads through this, so the desktop and shell `jobs`
+   show the same table; name_out holds 31 chars + NUL. */
+int  proc_bg_at(int n, char *name_out, u32 *pid_out, u32 *uid_out);
 void proc_save_from_regs(struct proc *p, struct regs *r);
 void scheduler_run(void);
 void timer_maybe_preempt(struct regs *r);

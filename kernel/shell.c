@@ -127,6 +127,33 @@ static void fails_clear(const char *name) {
         }
     }
 }
+/* Unlock primitive shared by the shell `unlock` command and the
+   desktop Settings Unlock row. It deliberately performs NO uid
+   check: the shell command checks root first, and the desktop
+   handler must check root first too (Repo Fetch precedent) —
+   fails_clear itself has no uid rule, so calling this without
+   the check would let a non-root session reset any account's
+   brute-force counter and defeat the 3-failure lockout.
+   It DOES check existence: before this fix both callers
+   reported success for a name that is not an account at all
+   (and wrote a false "unlock" audit entry for it), because
+   fails_clear silently does nothing for an unknown name.
+   An unknown name returns 0, clears nothing, and audits
+   nothing; the callers print the no-such-user refusal. The
+   no-audit claim is QEMU-proven by tests/qemu_test_audit_log.py
+   (root read-back of audit.log after a refused ghost unlock
+   plus a successful alice unlock), not just by this code path.
+   The loaded users table comes from users_load() at login.
+   users.txt changes at runtime only through `passwd`, which
+   rewrites the file and reloads the table itself, so the table
+   cannot go stale within a session; in setup mode (no users
+   file) every name correctly reports as unknown. */
+int shell_unlock_user(const char *name) {
+    if (!users_exists(name)) return 0;
+    fails_clear(name);
+    audit("unlock", name);
+    return 1;
+}
 
 /* Read one line from the keyboard. echo=1 prints chars, echo=0 prints
    nothing (passwords). Returns length. */
@@ -235,6 +262,20 @@ static int tokenize(char *line, char *tok[], char **rest) {
     return n;
 }
 
+/* Session logout (shared by the `logout` command and by a confirmed
+   desktop Logout click, which the shell performs when the desktop
+   returns). Kills the session's background jobs, audits, ends the
+   session, and returns 1 so the shell loop exits to the login
+   prompt. */
+static int shell_do_logout(void) {
+    int killed = proc_bg_kill_for_uid(session_uid);
+    if (killed > 0) console_printf("Killed %u background job(s) on logout.\n", killed);
+    audit("logout", session_name);
+    console_write("Logged out.\n");
+    session_active = 0;
+    return 1;
+}
+
 /* Session lock prompt (shared by the idle timeout and the `lock`
    command). Returns 1 if unlocked (session continues), 0 if the
    unlock failed and the caller must log out. In setup mode (no users
@@ -267,7 +308,7 @@ static int execute(char *line) {
     int n = tokenize(line, tok, &rest);
     if (n == 0) return 0;
     if (strcmp(tok[0], "help") == 0) {
-        console_write("Commands: help, mem, ticks, clear, reboot, fs, ls, cat <file>, write <file> <text>, rm <file>, run <file>, runbg <file>, jobs, kill <pid>, lock, unlock <user>, whoami, logout, idle [minutes|off], fbinfo, kbdstat, pkg list, pkg install <file>, pkg install <name>, pkg remove <name>, pkg remove <name> force, pkg repo [url], pkg update, pkg fetch <name>, sysupdate <bundle>, sysrollback, sha256 <file>, aes-test, gui, guitest, cursortest, cliptest, desktop, desktopautotest, desktopsectest, desktop10test, desktopappstest, desktop10sec, desktopwebtest, desktopnonic, mouse, netinfo, dhcp, ping <ip>, dns <name>, http <host> <path>, https <host> <path>, nettest\n");
+        console_write("Commands: help, mem, ticks, clear, reboot, fs, ls, cat <file>, write <file> <text>, rm <file>, mv <old> <new>, cp <src> <dst>, chmod <file> <mode>, run <file>, runbg <file>, jobs, kill <pid>, lock, unlock <user>, passwd [user], whoami, logout, idle [minutes|off], fbinfo, kbdstat, pkg list, pkg avail, pkg install <file>, pkg install <name>, pkg remove <name>, pkg remove <name> force, pkg repo [url], pkg update, pkg fetch <name>, sysupdate <bundle>, sysrollback, sha256 <file>, aes-test, gui, wmautotest, guitest, cursortest, cliptest, stormtest, desktop, desktopautotest, desktopsectest, desktopcalctest, desktop10test, desktopappstest, desktop10sec, desktopwebtest, desktopnonic, desktoprepotest, desktoprepoapptest, desktoppackageapptest, desktopfileinstalltest, desktopfileruntest, desktopmonitorjobtest, desktopreboottest, desktoplogouttest, desktopfilesysupdtest, desktoprollbacktest, desktopreposettest, desktopdnssettest, desktopnetpingtest, desktoprepofetchtest, desktopfileshashtest, desktopmonitordisktest, desktopwebsavetest, desktopfileschmodtest, desktopreporoottest, desktopsettingsunlocktest, desktopunlocknousertest, mouse, mousetest, mousepoll, netinfo, netdbg, dhcp, ping <ip>, dns <name>, dnsset <ip>, http <host> <path>, https <host> <path>, httpsa <host> <path>, nettest, hostmatch\n");
     } else if (strcmp(tok[0], "idle") == 0) {
         if (n < 2) {
             if (idle_timeout_minutes == 0) console_write("Idle timeout: disabled (never locks on idle)\n");
@@ -320,12 +361,7 @@ static int execute(char *line) {
     } else if (strcmp(tok[0], "whoami") == 0) {
         console_printf("%s uid %u\n", session_name, session_uid);
     } else if (strcmp(tok[0], "logout") == 0) {
-        int killed = proc_bg_kill_for_uid(session_uid);
-        if (killed > 0) console_printf("Killed %u background job(s) on logout.\n", killed);
-        audit("logout", session_name);
-        console_write("Logged out.\n");
-        session_active = 0;
-        return 1;
+        return shell_do_logout();
     } else if (strcmp(tok[0], "lock") == 0) {
         if (!do_lock()) {
             audit("logout", session_name);
@@ -336,9 +372,60 @@ static int execute(char *line) {
     } else if (strcmp(tok[0], "unlock") == 0) {
         if (n < 2) { console_write("Usage: unlock <user>\n"); return 0; }
         if (session_uid != 0) { console_write("unlock: root only\n"); return 0; }
-        fails_clear(tok[1]);
-        audit("unlock", tok[1]);
+        if (!shell_unlock_user(tok[1])) { console_printf("unlock: no such user %s\n", tok[1]); return 0; }
         console_printf("Unlocked %s\n", tok[1]);
+        return 0;
+    } else if (strcmp(tok[0], "passwd") == 0) {
+        /* Change a password at runtime (post-v1.0.0; previously the only
+           way was rebuilding users.txt offline). Root changes any user
+           without the current password, as on Unix; a non-root user
+           changes only their own password and must first pass the
+           current-password check. That check is NOT a login attempt: it
+           neither counts toward the failed-login lockout nor audits, so
+           probing it cannot lock the account out. Passwords are read
+           with echo off (read_line echo=0, as at login) and the buffers
+           are cleared before every return below. A successful change is
+           audited as "passwd <user>"; changing a password does NOT
+           clear a failed-login lockout — root still runs `unlock`. */
+        const char *target = (n >= 2) ? tok[1] : session_name;
+        if (n >= 2 && rest && rest[0]) { console_write("Usage: passwd [user]\n"); return 0; }
+        if (!users_exists(target)) { console_printf("passwd: no such user %s\n", target); return 0; }
+        if (session_uid != 0 && strcmp(target, session_name) != 0) {
+            console_write("passwd: permission denied\n"); return 0;
+        }
+        if (session_uid != 0) {
+            console_write("Current password: ");
+            char cur[64];
+            read_line(cur, sizeof(cur), 0);
+            u32 uid = 0;
+            if (!users_check(session_name, cur, &uid) || uid != session_uid) {
+                memset(cur, 0, sizeof(cur));
+                console_write("passwd: incorrect password\n"); return 0;
+            }
+            memset(cur, 0, sizeof(cur));
+        }
+        console_write("New password: ");
+        char npw[64];
+        read_line(npw, sizeof(npw), 0);
+        if (npw[0] == 0) {
+            memset(npw, 0, sizeof(npw));
+            console_write("passwd: empty password not allowed\n"); return 0;
+        }
+        console_write("Retype new password: ");
+        char rpw[64];
+        read_line(rpw, sizeof(rpw), 0);
+        if (strcmp(npw, rpw) != 0) {
+            memset(npw, 0, sizeof(npw)); memset(rpw, 0, sizeof(rpw));
+            console_write("passwd: passwords do not match\n"); return 0;
+        }
+        memset(rpw, 0, sizeof(rpw));
+        if (users_change_password(target, npw) != 0) {
+            memset(npw, 0, sizeof(npw));
+            console_write("passwd: cannot change password\n"); return 0;
+        }
+        memset(npw, 0, sizeof(npw));
+        console_printf("Password changed for %s\n", target);
+        audit("passwd", target);
         return 0;
     } else if (strcmp(tok[0], "fs") == 0) {
         fs_status();
@@ -347,14 +434,28 @@ static int execute(char *line) {
         fs_list_as(session_uid);
     } else if (strcmp(tok[0], "cat") == 0) {
         if (n < 2) { console_write("Usage: cat <file>\n"); return 0; }
+        /* Chunked display: the buffer stays 1024 bytes (the kernel
+           stack is 16 KiB, so no large stack array), but the file
+           is walked with fs_read_range_as, so a file of any size
+           prints in full instead of being refused over 1023 bytes.
+           The permission check runs on every window, so a refusal
+           cannot be walked around by offset. Text only: a NUL byte
+           ends the chunk console_write prints, as before. */
         u8 buf[1024];
-        u32 size = 0;
-        if (fs_read_as(tok[1], buf, sizeof(buf) - 1, &size, session_uid) != 0) {
-            console_printf("cat: cannot read %s\n", tok[1]);
-            return 0;
+        u32 off = 0;
+        for (;;) {
+            u32 size = 0;
+            if (fs_read_range_as(tok[1], buf, sizeof(buf) - 1, off, &size, session_uid) != 0) {
+                if (off == 0) console_printf("cat: cannot read %s\n", tok[1]);
+                else console_printf("cat: read error %s\n", tok[1]);
+                return 0;
+            }
+            if (size == 0) break;
+            buf[size] = 0;
+            console_write((const char *)buf);
+            off += size;
+            if (size < sizeof(buf) - 1) break;
         }
-        buf[size] = 0;
-        console_write((const char *)buf);
         console_write("\n");
     } else if (strcmp(tok[0], "write") == 0) {
         if (n < 2 || !rest || rest[0] == 0) {
@@ -372,6 +473,74 @@ static int execute(char *line) {
             return 0;
         }
         console_printf("Deleted %s\n", tok[1]);
+    } else if (strcmp(tok[0], "mv") == 0) {
+        /* tokenize() stops at 2 tokens: the old name is tok[1]
+           and the new name is the first word of rest (a second
+           word is a usage error, not silently ignored). */
+        if (n < 2 || !rest || !rest[0]) { console_write("Usage: mv <old> <new>\n"); return 0; }
+        char *nw = rest;
+        char *p = nw;
+        while (*p && *p != ' ') p++;
+        if (*p == ' ') {
+            *p = 0; p++;
+            while (*p == ' ') p++;
+            if (*p) { console_write("Usage: mv <old> <new>\n"); return 0; }
+        }
+        if (fs_rename_as(tok[1], nw, session_uid) != 0) {
+            console_printf("mv: cannot rename %s to %s\n", tok[1], nw);
+            return 0;
+        }
+        console_printf("Renamed %s to %s\n", tok[1], nw);
+    } else if (strcmp(tok[0], "cp") == 0) {
+        /* tokenize() stops at 2 tokens: the source is tok[1]
+           and the destination is the first word of rest (a second
+           word is a usage error, not silently ignored) — the
+           same rule as mv, so `cp a b c` never copies to b
+           while silently dropping c. */
+        if (n < 2 || !rest || !rest[0]) { console_write("Usage: cp <src> <dst>\n"); return 0; }
+        char *dst = rest;
+        char *p = dst;
+        while (*p && *p != ' ') p++;
+        if (*p == ' ') {
+            *p = 0; p++;
+            while (*p == ' ') p++;
+            if (*p) { console_write("Usage: cp <src> <dst>\n"); return 0; }
+        }
+        if (fs_copy_as(tok[1], dst, session_uid) != 0) {
+            console_printf("cp: cannot copy %s to %s\n", tok[1], dst);
+            return 0;
+        }
+        console_printf("Copied %s to %s\n", tok[1], dst);
+    } else if (strcmp(tok[0], "chmod") == 0) {
+        /* tokenize() stops at 2 tokens: the file is tok[1] and the
+           mode is the first word of rest (a second word is a usage
+           error, not silently ignored) — the same rule as mv/cp.
+           The mode is octal, 3 digits with an optional leading 0
+           ("600", "0644"); anything else is refused, never masked,
+           so `chmod f 999` cannot silently become a valid mode. */
+        if (n < 2 || !rest || !rest[0]) { console_write("Usage: chmod <file> <mode>\n"); return 0; }
+        char *ms = rest;
+        char *p = ms;
+        while (*p && *p != ' ') p++;
+        if (*p == ' ') {
+            *p = 0; p++;
+            while (*p == ' ') p++;
+            if (*p) { console_write("Usage: chmod <file> <mode>\n"); return 0; }
+        }
+        const char *d = ms;
+        if (d[0] == '0') d++;
+        u32 mode = 0; int ok = 1;
+        if (d[0] == 0 || d[1] == 0 || d[2] == 0 || d[3] != 0) ok = 0;
+        for (int i = 0; ok && i < 3; i++) {
+            if (d[i] < '0' || d[i] > '7') ok = 0;
+            else mode = mode * 8u + (u32)(d[i] - '0');
+        }
+        if (!ok) { console_printf("chmod: bad mode %s\n", ms); return 0; }
+        if (fs_chmod_as(tok[1], mode, session_uid) != 0) {
+            console_printf("chmod: cannot chmod %s\n", tok[1]);
+            return 0;
+        }
+        console_printf("chmod: %s mode %s\n", tok[1], ms);
     } else if (strcmp(tok[0], "run") == 0) {
         if (n < 2) { console_write("Usage: run <file>\n"); return 0; }
         if (proc_exec_file(tok[1], session_uid) != 0) {
@@ -382,9 +551,12 @@ static int execute(char *line) {
         /* Note: tokenize() stops at 2 tokens and puts the rest in
            `rest`, so pkg subcommand arguments come from `rest`, not
            tok[2]/tok[3]. */
-        if (n < 2) { console_write("Usage: pkg list | pkg install <file> | pkg install <name> | pkg remove <name> [force] | pkg repo [url] | pkg update | pkg fetch <name>\n"); return 0; }
+        if (n < 2) { console_write("Usage: pkg list | pkg avail | pkg install <file> | pkg install <name> | pkg remove <name> [force] | pkg repo [url] | pkg update | pkg fetch <name>\n"); return 0; }
         if (strcmp(tok[1], "list") == 0) {
             pkg_list();
+        } else if (strcmp(tok[1], "avail") == 0) {
+            /* Read-only like pkg list: no root check. */
+            pkg_repo_avail();
         } else if (strcmp(tok[1], "install") == 0) {
             if (!rest || rest[0] == 0) { console_write("Usage: pkg install <file>\n"); return 0; }
             if (session_uid != 0) { console_write("pkg install: root only\n"); return 0; }
@@ -423,7 +595,7 @@ static int execute(char *line) {
             }
             pkg_remove(rest, force);
         } else {
-            console_write("Usage: pkg list | pkg install <file> | pkg install <name> | pkg remove <name> [force] | pkg repo [url] | pkg update | pkg fetch <name>\n");
+            console_write("Usage: pkg list | pkg avail | pkg install <file> | pkg install <name> | pkg remove <name> [force] | pkg repo [url] | pkg update | pkg fetch <name>\n");
         }
     } else if (strcmp(tok[0], "gui") == 0) {
         wm_run();
@@ -435,8 +607,11 @@ static int execute(char *line) {
         wm_cursortest();
     } else if (strcmp(tok[0], "cliptest") == 0) {
         wm_cliptest();
+    } else if (strcmp(tok[0], "stormtest") == 0) {
+        wm_stormtest();
     } else if (strcmp(tok[0], "desktop") == 0) {
         wm_desktop_run();
+        if (wm_logout_requested()) return shell_do_logout();
     } else if (strcmp(tok[0], "desktopautotest") == 0) {
         wm_desktop_autotest();
     } else if (strcmp(tok[0], "desktopsectest") == 0) {
@@ -453,6 +628,49 @@ static int execute(char *line) {
         wm_desktop_webtest();
     } else if (strcmp(tok[0], "desktopnonic") == 0) {
         wm_desktop_nonictest();
+    } else if (strcmp(tok[0], "desktoprepotest") == 0) {
+        wm_desktop_repotest();
+    } else if (strcmp(tok[0], "desktoprepoapptest") == 0) {
+        wm_desktop_repoapptest();
+    } else if (strcmp(tok[0], "desktoppackageapptest") == 0) {
+        wm_desktop_packageapptest();
+    } else if (strcmp(tok[0], "desktopfileinstalltest") == 0) {
+        wm_desktop_fileinstalltest();
+    } else if (strcmp(tok[0], "desktopfileruntest") == 0) {
+        wm_desktop_fileruntest();
+    } else if (strcmp(tok[0], "desktopmonitorjobtest") == 0) {
+        wm_desktop_monitorjobtest();
+    } else if (strcmp(tok[0], "desktopreboottest") == 0) {
+        wm_desktop_reboottest();
+    } else if (strcmp(tok[0], "desktoplogouttest") == 0) {
+        wm_desktop_logouttest();
+        if (wm_logout_requested()) return shell_do_logout();
+    } else if (strcmp(tok[0], "desktopfilesysupdtest") == 0) {
+        wm_desktop_filesysupdtest();
+    } else if (strcmp(tok[0], "desktoprollbacktest") == 0) {
+        wm_desktop_rollbacktest();
+    } else if (strcmp(tok[0], "desktopreposettest") == 0) {
+        wm_desktop_reposettest();
+    } else if (strcmp(tok[0], "desktopdnssettest") == 0) {
+        wm_desktop_dnstest();
+    } else if (strcmp(tok[0], "desktopnetpingtest") == 0) {
+        wm_desktop_netpingtest();
+    } else if (strcmp(tok[0], "desktoprepofetchtest") == 0) {
+        wm_desktop_repofetchtest();
+    } else if (strcmp(tok[0], "desktopfileshashtest") == 0) {
+        wm_desktop_fileshashtest();
+    } else if (strcmp(tok[0], "desktopmonitordisktest") == 0) {
+        wm_desktop_monitordisktest();
+    } else if (strcmp(tok[0], "desktopwebsavetest") == 0) {
+        wm_desktop_websavetest();
+    } else if (strcmp(tok[0], "desktopfileschmodtest") == 0) {
+        wm_desktop_fileschmodtest();
+    } else if (strcmp(tok[0], "desktopreporoottest") == 0) {
+        wm_desktop_reporoottest();
+    } else if (strcmp(tok[0], "desktopsettingsunlocktest") == 0) {
+        wm_desktop_settingsunlocktest();
+    } else if (strcmp(tok[0], "desktopunlocknousertest") == 0) {
+        wm_desktop_unlocknousertest();
     } else if (strcmp(tok[0], "netinfo") == 0) {
         if (!net_present()) { console_write("net: no NIC\n"); return 0; }
         mac_t m; net_mac(&m);
@@ -535,8 +753,33 @@ static int execute(char *line) {
         if (bl == -2) console_write("https: certificate refused, connection not made\n");
         else if (bl < 0) console_write("https: failed\n");
         else console_printf("https: %d bytes%s\n%s\n", bl, net_fetch_truncated() ? " (truncated)" : "", body);
+    } else if (strcmp(tok[0], "httpsa") == 0) {
+        if (n < 2 || !rest || !rest[0]) { console_write("Usage: httpsa <host> <path> [port]\n"); return 0; }
+        char *path = rest;
+        char *sp = path;
+        while (*sp && *sp != ' ') sp++;
+        u16 port = 443;
+        if (*sp) {
+            *sp = 0; sp++;
+            while (*sp == ' ') sp++;
+            if (*sp) {
+                int v = 0, ok = 1;
+                for (const char *p = sp; *p && *p != ' '; p++) {
+                    if (*p < '0' || *p > '9') { ok = 0; break; }
+                    v = v * 10 + (*p - '0');
+                }
+                if (ok && v >= 1 && v <= 65535) port = (u16)v;
+            }
+        }
+        static char body[8192];
+        int bl = net_https_get_anchored(tok[1], port, path, body, sizeof(body));
+        if (bl == -2) console_write("httpsa: certificate refused, connection not made\n");
+        else if (bl < 0) console_write("httpsa: failed\n");
+        else console_printf("httpsa: %d bytes%s\n%s\n", bl, net_fetch_truncated() ? " (truncated)" : "", body);
     } else if (strcmp(tok[0], "nettest") == 0) {
         console_write(net_test_run() == 0 ? "nettest PASS\n" : "nettest FAIL\n");
+    } else if (strcmp(tok[0], "hostmatch") == 0) {
+        console_write(tls_hostmatch_selftest() == 0 ? "hostmatch PASS\n" : "hostmatch FAIL\n");
     } else if (strcmp(tok[0], "sysupdate") == 0) {
         /* Top-level command: its one argument is tok[1], not rest
            (rest holds text AFTER the second token — that is only
@@ -684,9 +927,19 @@ static int shell_loop(void) {
                 /* Idle session lock: v0.7.1 default 120 minutes,
                    configurable via `idle` (0 = never). The lock/
                    unlock code path itself is QEMU-tested via the
-                   `lock` command; waiting out the full timeout in
-                   a test is still not feasible, and that is
-                   documented as such. */
+                   `lock` command, and the desktop idle trigger is
+                   now QEMU-tested too: tests/qemu_test_idle_lock.py
+                   sets `idle 1`, enters the desktop, and waits out
+                   the 60-second timeout to the lock screen, then
+                   unlocks with the session password. The shell-loop
+                   trigger in this branch is QEMU-tested too:
+                   tests/qemu_test_shell_idle_lock.py sets `idle 1`
+                   at the shell prompt and waits out the 60-second
+                   timeout to the lock prompt, then unlocks with
+                   the session password. Waiting out the 120-minute
+                   default is still not feasible; the 1-minute wait
+                   proves the same trigger code path
+                   (shell_idle_minutes() * 6000 ticks). */
                 if (session_active && idle_timeout_minutes != 0 &&
                     timer_ticks - last_activity > idle_timeout_minutes * 6000u) {
                     console_write("\nSession locked due to inactivity.\n");

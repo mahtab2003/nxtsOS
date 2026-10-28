@@ -58,7 +58,20 @@ try:
     # After a guest reboot, GRUB reloads the kernel: a second boot
     # banner and a second shell prompt must appear.
     ok &= wait_for(lambda t: t.count("nxtsOS kernel starting") >= 2, 30, "second boot")
-    ok &= wait_for(lambda t: t.count("nxts> ") >= 2, 60, "second shell prompt")
+    # NOTE (v1.1.0 release): the old wait counted "nxts> " >= 2, which
+    # was already true from boot 1 (the "The nxts> shell prompt..."
+    # line + boot 1's prompt), so the readback command was typed
+    # during the reboot window and its first chars were lost in
+    # transit ("t persist.txt" twice) while `ls` still proved the
+    # file persisted. Wait for boot 2's own prompt instead: the
+    # second "Welcome to nxtsOS" followed by a prompt after it.
+    def second_prompt(t):
+        w1 = t.find("Welcome to nxtsOS")
+        if w1 < 0: return False
+        w2 = t.find("Welcome to nxtsOS", w1 + 1)
+        if w2 < 0: return False
+        return "root@nxts> " in t[w2:]
+    ok &= wait_for(second_prompt, 60, "second shell prompt")
     send_text("cat persist.txt", s); time.sleep(1)
     send_text("ls", s); time.sleep(1)
     s.close()

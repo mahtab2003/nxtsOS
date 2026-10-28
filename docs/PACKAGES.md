@@ -12,8 +12,16 @@ then:        file blobs, in manifest order, concatenated, no padding
 ```
 
 Total package size must be exactly `12 + manifest_len + sum(file sizes)`,
-at most 131,072 bytes. Each file is 1..65,536 bytes, at most 8 files
-per package, at most 8 packages installed (registry size limit).
+at most 132,096 bytes (the installer buffer, `PKG_MAX_SIZE` in
+kernel/pkg.c — the installer refuses any larger file). tools/mkpkg.py
+builds unsigned packages up to 131,072 bytes, and a signed package adds
+the 262-byte trailer below, so a mkpkg-built signed package is at most
+131,334 bytes — but the installer accepts any signed package up to the
+132,096-byte buffer. CORRECTION: this line used to say "at most 131,072
+bytes" flat, which understated the installer cap and contradicted the
+honest-limits bullet below, which already used 132,096. Each file is
+1..65,536 bytes, at most 8 files per package, at most 8 packages
+installed (registry size limit).
 
 Manifest lines (exactly one `name:`, one `version:`, one `depends:`,
 at least one `file:`, no unknown or duplicate lines):
@@ -188,19 +196,34 @@ proves who signed, not that the author is safe.
 ## Remote package repository (Phase 11, v1.0.0)
 
 - Commands (all root-only except `pkg repo` with no
-  argument, which prints the current repository):
-  `pkg repo <host[:port][/prefix]>` (stores the URL
-  in root-only `repo.txt`), `pkg update` (fetches
+  argument, which prints the current repository, and
+  `pkg avail`, which only reads the stored index):
+  `pkg repo [http://|https://|httpsa://]<host[:port][/prefix]>` (stores the URL
+  in root-only `repo.txt`; a bare host stays plain HTTP, `https://`
+  selects the TLS client and defaults to port 443, `httpsa://`
+  selects the anchored TLS client and also defaults to port
+  443), `pkg update` (fetches
   and verifies the index), `pkg fetch <name>`
   (downloads a package to `<name>.nxpkg`, refuses if
   that file already exists), `pkg install <name>`
   (bare name = repository install; a local file
   wins if it exists, and a `.nxpkg` argument is
-  always a local file).
-- Transport is plain HTTP BY DESIGN. The kernel TLS
+  always a local file), `pkg avail` (lists the name
+  and version of every package in the downloaded
+  index, with its index version; prints "(no index
+  downloaded - run pkg update from the shell)" if
+  no index has been downloaded yet).
+- Transport is plain HTTP by default, HTTPS when the
+  repository URL carries an `https://` scheme, anchored
+  HTTPS when it carries `httpsa://` (the chain terminal
+  must equal a pinned anchor — the compiled-in anchor or
+  a modulus in root-owned `tlsanchors.txt` — exactly
+  like the shell `httpsa` command; a self-signed cert
+  that TOFU would accept is refused in anchored mode).
+  The kernel TLS
   client has no public CA trust store (TOFU
   self-signed roots only), so HTTPS to a public host
-  cannot verify anything; signatures, not transport,
+  cannot verify anything beyond the hostname; signatures, not transport,
   carry authenticity — exactly like apt's signed
   Release files. A repository is a static directory:
   signed NXPKG002 packages + `index.txt` +
@@ -235,7 +258,14 @@ proves who signed, not that the author is safe.
   package must be a little under the 132096-byte
   package cap (headers take roughly 200 bytes);
   index size is capped at 16 KiB (64 packages);
-  there is no mirror/fallback, no per-package
-  pinning, and no TLS — a repository URL is
-  public by design, and only signatures make it
-  trustworthy.
+  there is no mirror/fallback and no per-package
+  pinning. CORRECTION: this bullet used to say
+  "no TLS" — repository transport DOES speak TLS
+  (`https://` selects the TOFU TLS client,
+  `httpsa://` the anchored client, kernel/pkg.c
+  repo_parse_url/repo_net_get), as the Transport
+  paragraph above already said. What is still
+  missing is a public CA trust store: `https://`
+  trusts self-signed roots (TOFU) only, so a
+  repository URL is public by design in the trust
+  sense, and only signatures make it trustworthy.

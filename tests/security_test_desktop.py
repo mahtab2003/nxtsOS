@@ -55,7 +55,17 @@ def boot(login_user, login_pass, actions, wait_marker=None):
             for ch in txt:
                 s.sendall(f"sendkey {KEYMAP.get(ch, ch)}\n".encode()); time.sleep(0.15)
             s.sendall(b"sendkey ret\n"); time.sleep(0.5)
-        send_text(login_user); send_text(login_pass); time.sleep(1)
+        # QEMU sendkey occasionally doubles a key, garbling the password
+        # ("Login incorrect"). The kernel then re-prompts for login; if
+        # we blindly sent the actions next, the first action would be
+        # consumed as a username. Retry the login once on failure.
+        for _attempt in range(2):
+            before = len(log_text()); prompts = log_text().count("login: ")
+            send_text(login_user); send_text(login_pass); time.sleep(1)
+            if "Login incorrect" not in log_text()[before:]:
+                break
+            if not wait_for(lambda t: t.count("login: ") > prompts, 30, "re-login prompt"):
+                break
         for txt in actions:
             send_text(txt); time.sleep(1)
         if wait_marker:

@@ -92,6 +92,22 @@ int proc_bg_exists(u32 pid) {
         if (bg_jobs[i].used && bg_jobs[i].p.pid == pid) return 1;
     return 0;
 }
+int proc_bg_at(int n, char *name_out, u32 *pid_out, u32 *uid_out) {
+    int seen = 0;
+    for (int i = 0; i < MAX_BG; i++) {
+        if (!bg_jobs[i].used) continue;
+        if (seen++ != n) continue;
+        if (name_out) {
+            int j = 0;
+            while (bg_jobs[i].name[j] && j < 31) { name_out[j] = bg_jobs[i].name[j]; j++; }
+            name_out[j] = 0;
+        }
+        if (pid_out) *pid_out = bg_jobs[i].p.pid;
+        if (uid_out) *uid_out = bg_jobs[i].p.uid;
+        return 0;
+    }
+    return -1;
+}
 int proc_bg_list(void) {
     int n = 0;
     for (int i = 0; i < MAX_BG; i++) {

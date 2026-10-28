@@ -36,7 +36,15 @@ part of the design, not footnotes.
   IHL bounds, total-length bounds, header checksum must
   fold to zero, **fragmented packets are dropped** (MF or
   offset set — no reassembly in v0.9.0), destination must
-  be our IP or broadcast. UDP dispatch by destination
+  be our IP or broadcast once configured — before DHCP
+  completes, `configured` is still 0 and the destination
+  check is skipped entirely (`net_rx_frame` enforces it
+  only inside `if (configured)`), so stray packets
+  addressed elsewhere are also accepted in the pre-DHCP
+  window, not just 0.0.0.0/broadcast as the code comment
+  suggests. CORRECTION: the previous wording stated the
+  destination rule without the pre-DHCP exception.
+  UDP dispatch by destination
   port: 68 DHCP, 53 or 5353 DNS (DNS replies arrive at
   the client's source port 5353, not 53 — dispatching
   only on 53 dropped every reply during testing).
@@ -63,7 +71,18 @@ part of the design, not footnotes.
   FIN|ACK and polls 50 ticks. Advertised window is a
   constant 4096 (the buffer size), not room-based.
 - **HTTP client:** HTTP/1.0, body until close or
-  Content-Length; chunked Transfer-Encoding is refused;
+  Content-Length; chunked Transfer-Encoding is refused
+  only when the header name arrives in exactly that
+  case (`net_http_get` matches the literal bytes
+  "Transfer-Encoding:") — a server sending the
+  lowercase name `transfer-encoding: chunked` is NOT
+  refused: the raw chunked bytes are returned as the
+  body instead (proven live 2026-10-28: a lowercase
+  chunked response returned "http: 15 bytes" with the
+  chunk framing intact, while the exact-case header
+  returned "http: failed"). CORRECTION: the previous
+  wording stated chunked encoding is refused without
+  the case qualification.
   body cap is the caller's buffer (the shell passes
   8192 bytes — a 5001-byte body fetches fine).
   v0.10.0 change: a body longer than the buffer is
@@ -75,19 +94,45 @@ part of the design, not footnotes.
 
 ## TLS 1.2 client (`net/tls.c`, `net/bignum.c`)
 
-One cipher suite only: TLS_RSA_WITH_AES_128_GCM_SHA256
-(0x009C), RSA key exchange, TLS 1.2 only. The handshake
-was verified against real OpenSSL (s_server and a
-python `ssl` server): ClientHello (SNI +
-signature_algorithms extensions — OpenSSL 3 servers
-reject hellos without the latter), ServerHello,
-Certificate, ServerHelloDone, RSA-encrypted premaster
-(PKCS#1 v1.5 type-2 padding, non-zero random bytes),
-master secret and key block via the TLS PRF (P_hash
-with SHA-256), ChangeCipherSpec, Finished both ways,
-then AES-128-GCM app data (nonce = write_IV ||
-sequence, AAD = sequence || type || version ||
-length, tag verified before decrypting).
+Two cipher suites, TLS 1.2 only: TLS_ECDHE_RSA_WITH_
+AES_128_GCM_SHA256 (0xC02F, offered first) and
+TLS_RSA_WITH_AES_128_GCM_SHA256 (0x009C). The
+handshake was verified against real OpenSSL (s_server
+and a python `ssl` server): ClientHello (SNI,
+signature_algorithms — OpenSSL 3 servers reject
+hellos without the latter — supported_groups
+(secp256r1 only), ec_point_formats (uncompressed
+only), and ALPN offering http/1.1 — the server's
+selected ALPN is not parsed, the client speaks
+HTTP/1.1 regardless), ServerHello, Certificate,
+ServerKeyExchange (ECDHE only: curve must be
+secp256r1, the point must be valid, and the
+RSA-SHA256 signature over client_random ||
+server_random || params must verify with the leaf
+key, or the handshake fails closed with no fallback
+to RSA key exchange), ServerHelloDone,
+ClientKeyExchange, master secret and key block via
+the TLS PRF (P_hash with SHA-256), ChangeCipherSpec,
+Finished both ways, then AES-128-GCM app data
+(nonce = write_IV || sequence, AAD = sequence ||
+type || version || length, tag verified before
+decrypting). ClientKeyExchange is RSA-encrypted
+premaster for 0x009C (PKCS#1 v1.5 type-2 padding,
+non-zero random bytes, 48-byte versioned premaster)
+or the ECDH public point for 0xC02F (the premaster
+is the 32-byte ECDH shared x coordinate, with no
+version prefix; the private scalar is drawn from the
+same weak RNG described below).
+
+CORRECTION (2026-10-28, TLS audit): this section
+previously said "One cipher suite only:
+TLS_RSA_WITH_AES_128_GCM_SHA256 (0x009C), RSA key
+exchange" and listed "No ECDHE" below. That was the
+v1.0.0 client (which offered and required 0x009C
+only); Phase 12 added the ECDHE path
+(`net/ec256.c`, secp256r1) and the ClientHello
+offers 0xC02F first. The old wording survives only
+in this note.
 
 **X.509 verification** (the part that must not be
 oversold): every certificate's dates are checked
@@ -99,9 +144,15 @@ verified by 2048-bit modular exponentiation
 (`net/bignum.c`: 64-limb fixed bignums, schoolbook
 multiply, binary long division — no 64-bit division,
 which the freestanding kernel cannot link); hostname
-matching is SAN-only when SANs exist (DNS exact
-match, case-insensitive, **no wildcards**; IP hosts
-match SAN IPs), CN fallback only when no SAN exists.
+matching is SAN-only when SANs exist (DNS names match
+exactly, case-insensitive, or by a single-label leading
+wildcard: `*.domain` matches exactly one label, so
+`one.domain` matches but the bare `domain`, a multi-label
+`a.b.domain`, a trailing-dot host, and a mid-label star
+like `foo.*.domain` do not; IP hosts match SAN IPs and
+never match a DNS SAN, and wildcards never apply to IP
+literals), CN fallback only when no SAN exists (the CN
+follows the same exact-or-single-label-wildcard rule).
 Certificate failure returns -2 and the shell prints
 "certificate refused, connection not made"; every
 other failure returns -1 ("https: failed").
@@ -109,25 +160,50 @@ other failure returns -1 ("https: failed").
 **What TLS here is NOT (read before deploying
 anything against it):**
 
-- **No CA trust store ships.** A chain must terminate
-  in a self-signed root whose signature verifies with
-  its own key, whose dates are valid, and whose leaf
+- **Plain `https` is trust on first use (TOFU), NOT CA
+  authentication.** A chain must terminate in a
+  self-signed root whose signature verifies with its
+  own key, whose dates are valid, and whose leaf
   matches the requested host. That proves
   self-consistency, host binding, and private-key
-  possession — it is trust on first use (TOFU), NOT CA
-  authentication. A man in the middle with their own
-  self-signed certificate for the same hostname would
-  also pass. A provisioned anchor store is future work.
+  possession — and nothing more. A man in the middle
+  with their own self-signed certificate for the same
+  hostname would also pass.
+- **Anchored `httpsa` (Phase 12) pins a trust anchor
+  instead.** The terminal certificate must be
+  CA-flagged and its RSA-2048 key must equal a pinned
+  anchor: the compiled-in anchor (Google Trust
+  Services WR1, generated by `tools/genanchor.py`
+  into `net/tls_anchor.h`) or a modulus listed in the
+  root-owned system file `tlsanchors.txt` (one
+  512-hex-char modulus per line, exponent 65537;
+  malformed lines are skipped, a missing file is not
+  an error). The anchor IS the trust root by pinning:
+  an intermediate like WR1 is issued by a root above
+  it whose 4096-bit key this 2048-bit kernel cannot
+  verify, so the chain is not walked past the anchor.
+  A chain terminating anywhere else fails with -2.
 - **Randomness is a timer/MAC-seeded xorshift32, NOT
   a cryptographic RNG.** This is the release's weakest
   link: premaster secrets, ClientHello randoms and the
   TCP ISN (ticks * 0x9E3779B9 ^ 0x12345678) are
   predictable to anyone who can observe timing. Fine
   for lab tests, NOT for real secrets.
-- No ECDHE, no session resumption, no ALPN, no client
-  certificates, no revocation checking, no TLS 1.3.
-  GCM tag comparison is not constant-time (the tag is
-  not a secret key, and this is a lab client).
+- No session resumption, no client certificates, no
+  revocation checking, no TLS 1.3. ALPN is offered
+  (http/1.1) but the server's selection is not
+  parsed. GCM tag comparison is not constant-time
+  (the tag is not a secret key, and this is a lab
+  client).
+
+CORRECTION (2026-10-28, TLS audit): the bullets
+above previously said "No CA trust store ships ...
+A provisioned anchor store is future work" and
+"No ECDHE ... no ALPN". Both were the v1.0.0
+position; Phase 12 shipped the pinned-anchor
+`httpsa` path and the ECDHE path, and the
+ClientHello offers ALPN. The old wording survives
+only in this note.
 
 ## Shell commands
 
@@ -137,10 +213,33 @@ found the register-offset bug), `dhcp`, `ping <ip>`
 (dotted quad only), `dns <name>`, `dnsset <ip>`
 (override the DNS server, e.g. for testing),
 `http <host> <path> [port]`,
-`https <host> <path> [port]`, `nettest` (10
+`https <host> <path> [port]`, `httpsa <host> <path>
+[port]` (anchored handshake — the chain must
+terminate in a pinned anchor, see the TLS section
+above; prints "httpsa: certificate refused,
+connection not made" on certificate failure),
+`nettest` (10
 malformed-frame injection cases through
-`net_rx_frame`; prints `nettest PASS` only if every
-case is dropped cleanly and nothing faults).
+`net_rx_frame`; prints `nettest PASS` when the run
+completes with failures == 0 and the aggregate drop
+counter moved (`net_test_run` checks only
+drops-after > drops-before, e.g. "drops 0 -> 10" in
+the live slirp run — that is an aggregate check, not
+a per-case drop assertion: a single case processed
+instead of dropped would not by itself fail the run
+while the counter still moved). CORRECTION: the
+previous wording stated `nettest PASS` prints only
+if every case is dropped cleanly and nothing faults,
+which overstated the check the code actually makes.
+`hostmatch` (hostname-matching self-test: calls the
+real `verify_host` on fabricated leaf structs — SAN
+wildcard cases, CN-fallback cases, and IP-branch
+cases — and prints "hostmatch: 0 failures" plus
+`hostmatch PASS` only if every case matches the rule
+above. This is the wildcard verification that can run
+in this sandbox: guest DNS over slirp UDP is blocked,
+so a live wildcard-SAN handshake cannot run here; the
+end-to-end case awaits a peer-harness TLS proxy test).
 
 ## Try it (QEMU slirp)
 
@@ -163,12 +262,27 @@ deterministic peer-harness suite
 (`tests/qemu_test_net_peer.py`) covers DNS strictly
 without slirp.
 
-## NOT implemented in v0.9.0
+## NOT implemented (re-checked against the post-v1.0.0 tree)
+
+Two items from the v0.9.0 version of this list have shipped
+since and are struck from it below, not silently dropped:
+package signing shipped in v1.0.0 (NXPKG002, RSA-2048 —
+see `docs/PACKAGES.md`), and graphical network settings
+partially shipped in v0.10.0 (the desktop Network window
+runs DHCP, sets DNS, and pings the gateway — see
+`docs/DESKTOP.md`). What remains of the graphical-settings
+gap is static IP configuration: there is no shell command
+and no GUI control for it, only one-shot DHCP. The items
+that are still genuinely unimplemented, each re-checked
+against the code rather than carried forward:
 
 User-mode socket API (networking is kernel stack +
-shell commands only), graphical network settings,
-TCP as a general or multi-connection layer (one
-client connection), IPv4 fragmentation reassembly,
-DNS CNAME following, DNS over TCP, DHCP renewal and
-release, package signing (unchanged), UEFI
-(unchanged).
+shell commands only; no socket syscalls exist), TCP as a
+general or multi-connection layer (one client connection
+at a time, `net/tcp.c` header), IPv4 fragmentation
+reassembly (fragments are dropped, `net/net.c`), DNS
+CNAME following (CNAME records are skipped, `net/net.c`),
+DNS over TCP (DNS goes out by UDP to port 53 only),
+DHCP renewal and release (DHCP is one-shot; no
+renew/release path exists), UEFI (BIOS multiboot via
+GRUB; no EFI boot path).

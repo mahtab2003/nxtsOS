@@ -3,8 +3,16 @@
 Targets (development targets, not guarantees):
 
 - 32–64 MB: minimal text/diagnostic configuration — investigate, not promised.
-- 128 MB: basic graphical desktop (future phase).
-- 256 MB: comfortable graphical desktop with additional services (future phase).
+- 128 MB: basic graphical desktop (shipped in v0.10.0 — CORRECTION:
+  this line used to say "future phase"; the desktop exists now, and
+  every desktop QEMU test boots at 128 MB, but no idle-memory figure
+  for it has been measured yet, so 128 MB remains a target, not a
+  measured result).
+- 256 MB: comfortable graphical desktop with additional services
+  (shipped in v0.10.0 — CORRECTION: this line used to say "future
+  phase"; the desktop exists now, but no idle-memory figure for it
+  has been measured yet, so "comfortable" at 256 MB remains a target,
+  not a measured result).
 
 ## Measured in v0.1.0
 
@@ -23,5 +31,11 @@ Targets (development targets, not guarantees):
   presented as guest usage.
 
 No idle-memory figure for a graphical desktop can honestly be reported
-yet, because there is no graphical desktop in v0.1.0. That measurement
-belongs to Phase 5 and will be recorded then, from the VM.
+yet. CORRECTION: this paragraph used to say there was no graphical
+desktop (true in v0.1.0) and that the measurement belonged to Phase 5.
+The desktop shipped in v0.10.0 (Phase 10, not Phase 5), and its Monitor
+window does report "Memory used (KiB)" live (kernel/wm.c) — but no
+reading of that figure has been taken from a booted desktop yet (it is
+framebuffer text, not a serial line, so it needs a screendump read, not
+a log grep), so the idle figure remains outstanding and will be
+recorded from the VM when it is measured.

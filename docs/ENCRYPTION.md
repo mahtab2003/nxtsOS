@@ -13,7 +13,9 @@ sectors as before, and the ATA layer encrypts/decrypts underneath.
 Physical sector 0 (plaintext header, 512 bytes):
   0-7:   "NXTSENC1"
   8-11:  version, u32 LE = 1
-  12-15: iteration count, u32 LE = 10000
+  12-15: iteration count, u32 LE (10000 by default; the kernel
+    accepts 1000-100000, and tools/mkdisk_enc.py --iterations
+    sets it — the count is a per-disk field, not a fixed constant)
   16-31: salt, 16 bytes, random per disk
   32-47: key-check ciphertext (see below)
   48-511: zero (reserved)
@@ -29,7 +31,8 @@ header magic, and the kernel prompts before mounting anything.
 
 ```
 key = SHA256(salt + passphrase)
-repeat 9999 times: key = SHA256(key + salt)   # 10000 hashes total
+repeat (count - 1) times: key = SHA256(key + salt)
+  # count is the header's iteration count, 10000 by default
 ```
 
 The salt is stored in the header, so the same passphrase on two disks
@@ -98,10 +101,14 @@ python3 tools/mkdisk_enc.py plain.img enc.img --passphrase 'your-passphrase'
   valid package/file hash without the key.
 - **No protection against offline brute force beyond the work
   factor.** The header salt + key check lets an attacker with the
-  disk try passphrases offline, at 10000 SHA-256 rounds per guess.
+  disk try passphrases offline, at the header's iteration count
+  (10000 by default) of SHA-256 rounds per guess.
   A weak passphrase (e.g. "password") is guessable — use a strong
-  one. A memory-hard KDF (Argon2/bcrypt) would raise the cost, and
-  is a Phase 11 hardening item, same as the password hash.
+  one. A memory-hard KDF (Argon2/bcrypt) would raise the cost.
+  CORRECTION: this used to say the KDF "is a Phase 11 hardening
+  item" — Phase 11 shipped in v1.0.0 without it, same as the
+  password hash (see docs/SECURITY.md), so the KDF remains an
+  outstanding hardening item, not a Phase 11 item still to come.
 - **Header tampering is detected, not recovered.** Flipping the
   key-check ciphertext makes every passphrase fail, by design.
 - **Performance:** CTR encryption is per sector, on every read and

@@ -36,5 +36,7 @@ void fb_draw_text_clip(s32 x, s32 y, const char *s, u32 fg, u32 bg,
                        s32 cx, s32 cy, s32 cw, s32 ch);
 u32  fb_read_pixel(s32 x, s32 y); /* 0 if out of bounds */
 u32  fb_checksum(void); /* simple sum of all pixels, for tests */
+void fb_present_rect(s32 x, s32 y, s32 w, s32 h); /* back buffer -> visible framebuffer, clipped; no-op without a back buffer */
+void fb_present(void); /* present the whole screen */
 #define FB_VIRT 0x40000000u
 #endif

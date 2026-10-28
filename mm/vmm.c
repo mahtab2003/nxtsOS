@@ -86,8 +86,11 @@ u32 vmm_create_pd(void) {
        program's print syscall goes through console_putchar, which
        in graphics mode writes to the framebuffer. Without this,
        the first user print in graphics mode page-faulted, because
-       FB_VIRT was unmapped in user PDs. User code itself (ring 3)
-       still cannot access these supervisor pages directly. */
+       FB_VIRT was unmapped in user PDs. The back buffer lives
+       immediately after the framebuffer inside this same 4 MB
+       entry, so it is shared by the same copy. User code itself
+       (ring 3) still cannot access these supervisor pages
+       directly. */
     npd[256] = kpd[256];
     return pd;
 }

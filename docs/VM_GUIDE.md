@@ -68,10 +68,12 @@ therefore not made as a supported configuration. QEMU is the supported path.
 Use the shipped `config/vm/bochsrc.txt` (also in the dist zip):
 `bochs -q -f bochsrc.txt` (adjust the ISO and VGABIOS paths to
 your install). It sets `vga: extension=vbe` with the SeaBIOS
-stdvga VGABIOS, 32 MB RAM, CDROM boot. Do NOT use Bochs' default
-isavga VGABIOS or the cirrus extension for nxtsOS graphics —
-both were tested and cannot set 800x600x32 in Bochs 2.7 +
-SeaBIOS (see docs/GRAPHICS.md). After the shell prompt appears,
+stdvga VGABIOS, 32 MB RAM, CDROM boot. Do NOT use the cirrus
+extension for nxtsOS graphics — it was tested and cannot set
+800x600x32 in Bochs 2.7 + SeaBIOS (see docs/GRAPHICS.md). The
+isavga VGABIOS does work via the kernel's VBE fallback on Bochs
+2.7, but it is not the shipped/supported config — use the
+shipped bochsrc. After the shell prompt appears,
 click inside the Bochs window first, then type — Bochs SDL only
 delivers keys to the focused window.
 
@@ -177,12 +179,29 @@ delivers keys to the focused window.
   server on 127.0.0.1:8443). `dnsset <ip>` overrides
   the DNS server; `nettest` runs the malformed-frame
   injection suite.
-- TLS limits (do not skip): no CA trust store ships —
-  the server certificate chain must end in a
-  self-signed root (TOFU, not CA authentication), and
-  the client's randomness is not cryptographic. See
+- TLS limits (do not skip): plain `https` is trust on
+  first use (TOFU, not CA authentication) — the server
+  certificate chain must end in a self-signed root
+  whose signature verifies with its own key. `httpsa`
+  (Phase 12) is different: it pins a trust anchor, so
+  the chain must terminate in a CA-flagged certificate
+  whose RSA-2048 key equals the compiled-in anchor
+  (Google Trust Services WR1, `net/tls_anchor.h`) or
+  a modulus listed in the root-owned system file
+  `tlsanchors.txt`; a chain terminating anywhere else
+  is refused. Neither path is a full CA store, and the
+  client's randomness is not cryptographic
+  (timer/MAC-seeded xorshift32). See
   docs/NETWORKING.md before using `https` for anything
   real.
+
+  CORRECTION (2026-10-28, VM_GUIDE Networking audit):
+  this bullet previously said "no CA trust store ships"
+  with no qualification. That was the v1.0.0 position;
+  Phase 12 shipped the pinned-anchor `httpsa` path, so
+  the blanket wording is now false for `httpsa` (the
+  plain-`https` TOFU half is unchanged). The old
+  wording survives only in this note.
 - Slirp DNS (10.0.2.3) does not work everywhere: if
   the host blocks outbound UDP, slirp answers DNS with
   ICMP net-unreachable even though the guest's query

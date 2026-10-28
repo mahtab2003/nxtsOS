@@ -72,7 +72,9 @@ for m in ["mousetest PASS", "guitest PASS", "wmautotest PASS",
           "guitest: neg clamped to x=-100 y=0",
           "guitest: huge clamped to w=800 h=600",
           "guitest: off clamped to x=700 y=550",
-          "overflow=-1 count=8 (max 8)",
+          # MAX_WINDOWS is 16 since post-v1.0.0 chunk 6(b) (was 8);
+          # the limit itself is what this checks, not the old number.
+          "overflow=-1 count=16 (max 16)",
           "guitest: corner pixels 0x106040 0x106040",
           "Button OK clicked"]:
     f = m in log1; print(f"{'PASS' if f else 'FAIL'} boot1: {m}"); ok = ok and f

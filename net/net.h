@@ -91,8 +91,12 @@ void net_set_fetch_truncated(int v);
 /* TLS 1.2 client (net/tls.c). Returns body length or -1; on
    certificate failure returns -2 (refused, never "accept"). */
 int  net_https_get(const char *host, u16 port, const char *path, char *buf, u32 max);
+int  net_https_get_anchored(const char *host, u16 port, const char *path, char *buf, u32 max);
 
 /* Adversarial test entry (net/nettest.c). */
 int  net_test_run(void);         /* 0 all checks pass */
+
+/* Hostname self-test entry (net/tls.c). */
+int  tls_hostmatch_selftest(void); /* 0 all cases pass */
 
 #endif

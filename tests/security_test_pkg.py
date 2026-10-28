@@ -48,9 +48,20 @@ def boot_and_run(actions, prompt="root@nxts> "):
         try: s.recv(4096)
         except socket.timeout: pass
         def send_text(txt):
-            for ch in txt:
-                s.sendall(f"sendkey {KEYMAP.get(ch, ch)}\n".encode()); time.sleep(0.15)
-            s.sendall(b"sendkey ret\n"); time.sleep(0.3)
+            # QEMU sendkey occasionally delivers a key twice ("iinstall"),
+            # which garbles an otherwise valid command into "Unknown
+            # command" or a Usage line. Every scripted command here is
+            # valid, so either marker in the fresh output means the
+            # delivery was garbled: send once more.
+            for _attempt in range(2):
+                before = len(log_text())
+                for ch in txt:
+                    s.sendall(f"sendkey {KEYMAP.get(ch, ch)}\n".encode()); time.sleep(0.15)
+                s.sendall(b"sendkey ret\n"); time.sleep(0.3)
+                fresh = log_text()[before:]
+                if "Unknown command" not in fresh and "Usage: " not in fresh:
+                    break
+                time.sleep(0.5)
         for txt in actions:
             send_text(txt); time.sleep(1)
         time.sleep(1); s.close()

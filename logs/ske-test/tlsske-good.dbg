@@ -1,0 +1,25 @@
+PEER> flags=0x12 seq=1000 ack=4137119581 len=0
+GUEST> established ack=1001
+GUEST> flags=0x18 seq=4137119581 ack=1001 len=5 expected=4137119581 una=1000 my_seq=1001
+PEER> flags=0x10 seq=1001 ack=4137119586 len=0
+GUEST> flags=0x18 seq=4137119586 ack=1001 len=103 expected=4137119586 una=1001 my_seq=1001
+PEER> flags=0x10 seq=1001 ack=4137119689 len=0
+RAW> flight len=1211 bad_sig=False client_random=dd6c4b14d6387ac2...
+PEER> flags=0x18 seq=1001 ack=4137119689 len=1211
+GUEST> flags=0x10 seq=4137119689 ack=2212 len=0 expected=4137119689 una=1001 my_seq=2212
+GUEST> flags=0x18 seq=4137119689 ack=2212 len=5 expected=4137119689 una=2212 my_seq=2212
+PEER> flags=0x10 seq=2212 ack=4137119694 len=0
+GUEST> flags=0x18 seq=4137119694 ack=2212 len=70 expected=4137119694 una=2212 my_seq=2212
+PEER> flags=0x10 seq=2212 ack=4137119764 len=0
+RAW> ClientKeyExchange seen (SKE passed)
+GUEST> flags=0x18 seq=4137119764 ack=2212 len=5 expected=4137119764 una=2212 my_seq=2212
+PEER> flags=0x10 seq=2212 ack=4137119769 len=0
+GUEST> flags=0x18 seq=4137119769 ack=2212 len=1 expected=4137119769 una=2212 my_seq=2212
+PEER> flags=0x10 seq=2212 ack=4137119770 len=0
+GUEST> flags=0x18 seq=4137119770 ack=2212 len=5 expected=4137119770 una=2212 my_seq=2212
+PEER> flags=0x10 seq=2212 ack=4137119775 len=0
+GUEST> flags=0x18 seq=4137119775 ack=2212 len=40 expected=4137119775 una=2212 my_seq=2212
+PEER> flags=0x10 seq=2212 ack=4137119815 len=0
+GUEST> flags=0x11 seq=4137119815 ack=2212 len=0 expected=4137119815 una=2212 my_seq=2212
+PEER> flags=0x10 seq=2212 ack=4137119816 len=0
+PEER> flags=0x11 seq=2212 ack=4137119816 len=0

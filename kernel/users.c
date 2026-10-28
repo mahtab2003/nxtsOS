@@ -1,6 +1,7 @@
 #include "users.h"
 #include "console.h"
 #include "../fs/vfs.h"
+#include "../drivers/pit.h" /* timer_ticks: the only in-kernel entropy source for salts */
 
 struct user_rec {
     char name[32];
@@ -122,6 +123,13 @@ int users_load(void) {
     return user_count;
 }
 
+int users_exists(const char *name) {
+    if (!name) return 0;
+    for (int i = 0; i < user_count; i++)
+        if (strcmp(users[i].name, name) == 0) return 1;
+    return 0;
+}
+
 int users_check(const char *name, const char *password, u32 *uid_out) {
     if (!password || password[0] == 0) return 0; /* empty passwords never match */
     for (int i = 0; i < user_count; i++) {
@@ -140,4 +148,88 @@ const char *users_name_for_uid(u32 uid) {
     for (int i = 0; i < user_count; i++)
         if (users[i].uid == uid) return users[i].name;
     return uid == 0 ? "root" : "unknown";
+}
+
+/* Runtime password change (shell `passwd`, post-v1.0.0). The salt is
+   NOT secret — it is stored in plaintext in users.txt, like every salt
+   — so it only needs to be distinct per user and per change, which the
+   100 Hz tick counter plus a monotonic change counter give: two changes
+   in the same tick still differ, and a changed password never reuses the
+   previous salt. The kernel has no hardware RNG; ticks are the only
+   in-kernel entropy source, and that limit is documented, not hidden.
+   The rewrite buffer is file-scope, not stack: the kernel stack is
+   16 KiB. Worst case is 8 users x (31 name + 1 + 6 uid + 1 + 12 salt +
+   1 + 8 hash + 1 newline) = 488 bytes, far inside the 1024-byte buffer;
+   the length check below refuses rather than overflows regardless. */
+static u32 passwd_counter = 0;
+static char passwd_file_buf[1024];
+
+static void gen_salt(char *out, u32 uid) {
+    static const char alpha[] = "abcdefghijklmnopqrstuvwxyz0123456789";
+    u32 s = timer_ticks ^ (passwd_counter * 2654435761u) ^ (uid * 40503u)
+        ^ 0x9E3779B9u;
+    passwd_counter++;
+    for (int i = 0; i < 12; i++) {
+        s ^= s << 13; s ^= s >> 17; s ^= s << 5; /* xorshift32 */
+        out[i] = alpha[s % 36];
+    }
+    out[12] = 0;
+}
+
+static int passwd_overflow = 0;
+static void buf_putc(char *buf, u32 *pos, char c) {
+    if (*pos < sizeof(passwd_file_buf) - 1) buf[(*pos)++] = c;
+    else passwd_overflow = 1; /* truncated input: the caller refuses the write */
+}
+static void buf_puts(char *buf, u32 *pos, const char *s) {
+    while (*s) buf_putc(buf, pos, *s++);
+}
+static void buf_put_u32(char *buf, u32 *pos, u32 v) {
+    char rev[10]; int n = 0;
+    if (v == 0) rev[n++] = '0';
+    else while (v > 0) { rev[n++] = (char)('0' + (v % 10u)); v /= 10u; }
+    while (n > 0) buf_putc(buf, pos, rev[--n]);
+}
+static void buf_put_hex8(char *buf, u32 *pos, u32 v) {
+    static const char hexd[] = "0123456789abcdef";
+    for (int sh = 28; sh >= 0; sh -= 4) buf_putc(buf, pos, hexd[(v >> sh) & 0xFu]);
+}
+
+int users_change_password(const char *name, const char *new_password) {
+    if (!name || !new_password || new_password[0] == 0) return -1;
+    if (!fs_mounted()) return -1;
+    int idx = -1;
+    for (int i = 0; i < user_count; i++)
+        if (strcmp(users[i].name, name) == 0) { idx = i; break; }
+    if (idx < 0) return -1; /* not a loaded user */
+    char salt[16];
+    gen_salt(salt, users[idx].uid);
+    u32 hash = users_hash(salt, new_password);
+    u32 pos = 0;
+    passwd_overflow = 0;
+    for (int i = 0; i < user_count; i++) {
+        buf_puts(passwd_file_buf, &pos, users[i].name);
+        buf_putc(passwd_file_buf, &pos, ':');
+        buf_put_u32(passwd_file_buf, &pos, users[i].uid);
+        buf_putc(passwd_file_buf, &pos, ':');
+        if (i == idx) buf_puts(passwd_file_buf, &pos, salt);
+        else buf_puts(passwd_file_buf, &pos, users[i].salt);
+        buf_putc(passwd_file_buf, &pos, ':');
+        if (i == idx) buf_put_hex8(passwd_file_buf, &pos, hash);
+        else buf_put_hex8(passwd_file_buf, &pos, users[i].hash);
+        buf_putc(passwd_file_buf, &pos, '\n');
+    }
+    if (passwd_overflow) return -1; /* cannot happen: see above, but never write truncated */
+    /* Root-only overwrite, root-owned 0600, so the rewritten file keeps
+       the protection the original had; fs_write_as writes the new
+       sectors before committing bitmap + directory, so a no-space
+       failure keeps the old file. */
+    if (fs_write_as("users.txt", (const u8 *)passwd_file_buf, pos, 0, 0600) != 0)
+        return -1;
+    /* Reload so the in-memory table matches the file, then prove the new
+       password checks before reporting success. */
+    if (users_load() <= 0) return -1;
+    u32 uid = 0;
+    if (!users_check(name, new_password, &uid)) return -1;
+    return 0;
 }

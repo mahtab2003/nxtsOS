@@ -34,9 +34,21 @@ What actually works in v1.0.0, verified by booting the real ISO in QEMU and in B
   rollback against the stored version, stored index
   re-verified on every use), `pkg fetch`, and
   `pkg install <name>` from the repository. The
-  public hosting publish is still pending the user's
-  explicit approval; the mechanism itself is verified
-  against a local repository.
+  public hosting publish is DONE (CORRECTION: this
+  line used to say the publish was still pending
+  the user's explicit approval — the user approved
+  it on 2026-10-27 and it published the same day:
+  Vercel project nxtsos-repo, production alias
+  nxtsos-repo.vercel.app, index v1 listing calc
+  1.0 and term 1.0, re-verified live on
+  2026-10-28); the mechanism itself is verified
+  against a local repository. LIMIT, unchanged:
+  Vercel redirects plain HTTP to HTTPS (308) and
+  the kernel client speaks plain HTTP only with no
+  public CA store, so the kernel cannot fetch from
+  this host yet — the decision (plain-HTTP host
+  vs CA-store HTTPS in the kernel) is still
+  pending from the user.
 - A full adversarial review (Phase 11.2): every
   earlier security suite re-run green, plus a fresh
   pass over syscalls, drivers, and parsers. Two real
@@ -178,9 +190,10 @@ What actually works in v0.8.0, verified by booting the real ISO in QEMU and in B
   request removed, and in Bochs 2.7 itself: framebuffer 800x600
   at 0xE0000000, `guitest PASS`), plus `fbinfo` to diagnose a
   missing framebuffer. For Bochs, use the shipped `bochsrc.txt`
-  (`vga: extension=vbe`, stdvga VGABIOS) — Bochs' default isavga
-  and cirrus configs cannot run the GUI (proven, see
-  docs/GRAPHICS.md). Real mouse movement via QEMU/VNC was NOT
+  (`vga: extension=vbe`, stdvga VGABIOS) — the cirrus device
+  cannot run the GUI (proven, see docs/GRAPHICS.md; the isavga
+  VGABIOS works via the kernel fallback but is not the shipped
+  config). Real mouse movement via QEMU/VNC was NOT
   testable in the build sandbox (QEMU did not inject mouse
   packets) — test `gui` with a real mouse on your machine;
   driver + WM click/drag logic are proven via

@@ -359,6 +359,17 @@ static int pkg_verify_signature(const u8 *buf, const struct pkg_manifest *m) {
     return pkg_verify_sig(buf + 12, m->mlen, m->sig);
 }
 
+int pkg_registry_entry(int idx, char *name, char *version) {
+    if (idx < 0 || !name || !version) return -1;
+    if (registry_load() != 0) return -1;
+    if (idx >= reg_count) return -1;
+    /* Registry fields are NUL-terminated by registry_load's memset,
+       but copy defensively with an explicit terminator. */
+    int i = 0; while (i < 31 && registry[idx].name[i]) { name[i] = registry[idx].name[i]; i++; } name[i] = 0;
+    i = 0; while (i < 15 && registry[idx].version[i]) { version[i] = registry[idx].version[i]; i++; } version[i] = 0;
+    return 0;
+}
+
 int pkg_list(void) {
     if (registry_load() != 0) { console_write("pkg: no filesystem\n"); return -1; }
     if (reg_count == 0) { console_write("(no packages installed)\n"); return 0; }
@@ -1218,9 +1229,33 @@ static int repo_parse_index(const char *buf, u32 len, u32 *version_out,
 
 /* Parse "host[:port][/prefix]" into parts. Host: alnum, '.', '-'.
    Port defaults to 80. Prefix defaults to "". */
+/* Repo URL forms (repo HTTPS chunk, plus anchored repo chunk):
+   a bare host stays plain HTTP (the v1.0.0 form, unchanged);
+   an explicit http://, https://, or httpsa:// scheme selects
+   the transport, https:// and httpsa:// defaulting to port
+   443. httpsa:// selects the ANCHORED TLS client (the shell
+   `httpsa` client: the chain terminal must equal a pinned
+   anchor, never TOFU), https:// the TOFU TLS client. Anything
+   else with a scheme-like shape (e.g. ftp://) still fails
+   below: the host loop stops at ':' and the port parse
+   refuses the '/'. Scheme matching is exact lowercase only;
+   an uppercase scheme is refused, never silently treated as
+   HTTP. tls_out is a transport mode, not a boolean: 0 =
+   HTTP, 1 = HTTPS (TOFU), 2 = HTTPS anchored; it may be NULL
+   (validate only, used by pkg_repo_set). */
 static int repo_parse_url(const char *url, char *host, u32 host_max,
-                          u16 *port_out, char *prefix, u32 prefix_max) {
-    u32 i = 0, hl = 0;
+                          u16 *port_out, char *prefix, u32 prefix_max,
+                          int *tls_out) {
+    u32 i = 0;
+    int tls = 0;
+    if (strncmp(url, "http://", 7) == 0) {
+        i = 7;
+    } else if (strncmp(url, "httpsa://", 9) == 0) {
+        tls = 2; i = 9;
+    } else if (strncmp(url, "https://", 8) == 0) {
+        tls = 1; i = 8;
+    }
+    u32 hl = 0;
     while (url[i] && url[i] != ':' && url[i] != '/') {
         char c = url[i];
         if (!(c >= 'a' && c <= 'z') && !(c >= 'A' && c <= 'Z') &&
@@ -1230,7 +1265,7 @@ static int repo_parse_url(const char *url, char *host, u32 host_max,
     }
     if (hl == 0) return -1;
     host[hl] = 0;
-    u16 port = 80;
+    u16 port = tls ? 443 : 80;
     if (url[i] == ':') {
         i++;
         u32 v = 0, digits = 0;
@@ -1246,6 +1281,7 @@ static int repo_parse_url(const char *url, char *host, u32 host_max,
         port = (u16)v;
     }
     if (port_out) *port_out = port;
+    if (tls_out) *tls_out = tls;
     u32 pl = 0;
     if (url[i] == '/') {
         i++; /* prefix stored WITHOUT the leading slash: joins
@@ -1295,12 +1331,33 @@ static int repo_find(const char *name, struct repo_entry *out) {
     return -1;
 }
 
+/* One repo fetch in the transport mode repo_parse_url
+   produced: 0 = HTTP, 1 = HTTPS (TOFU, shell `https`
+   client), 2 = HTTPS anchored (shell `httpsa` client).
+   A mode outside 0..2 cannot reach here (parse only
+   produces those three), but it fails closed as HTTP
+   refused, never as a silent downgrade: callers pass
+   only parsed modes, and this default arm exists so a
+   future mode cannot accidentally become plain HTTP. */
+static int repo_net_get(const char *host, u16 port, const char *path,
+                        char *buf, u32 max, int mode) {
+    if (mode == 2) return net_https_get_anchored(host, port, path, buf, max);
+    if (mode == 1) return net_https_get(host, port, path, buf, max);
+    if (mode == 0) return net_http_get(host, port, path, buf, max);
+    return -1;
+}
+
 /* Fetch + verify one repo file into pkg_buf. Returns length or -1.
    Checks: HTTP fetch ok + not truncated, index hash match (for
    packages), manifest parse ok, package signature ok. */
 static int repo_download(const char *host, u16 port, const char *path,
-                         const struct repo_entry *entry) {
-    int bl = net_http_get(host, port, path, (char *)pkg_buf, sizeof(pkg_buf));
+                         const struct repo_entry *entry, int use_tls) {
+    /* The index signature and the package hash + signature
+       below remain the authenticity checks in every transport
+       mode, so transport choice never weakens them; anchored
+       mode additionally requires a pinned chain terminal. */
+    int bl = repo_net_get(host, port, path, (char *)pkg_buf, sizeof(pkg_buf), use_tls);
+    if (bl == -2) { console_write("repo: repository certificate refused\n"); return -1; }
     if (bl < 0) { console_write("repo: download failed\n"); return -1; }
     if (net_fetch_truncated()) {
         console_write("repo: download truncated, refused\n"); return -1;
@@ -1335,12 +1392,55 @@ int pkg_repo_show(void) {
     return 0;
 }
 
+int pkg_repo_avail(void) {
+    u32 ver = 0;
+    int n = pkg_repo_browse_load(&ver);
+    if (n < 0) {
+        console_write("(no index downloaded - run pkg update from the shell)\n");
+        return 0;
+    }
+    console_printf("Available packages (index version %u):\n", ver);
+    for (int i = 0; i < n; i++) {
+        char name[32], version[16];
+        if (pkg_repo_browse_entry(i, name, version) != 0) break;
+        console_printf("%s %s\n", name, version);
+    }
+    return 0;
+}
+
+/* Repo browser accessors (6b): the window copies entries at open
+   time, so a later `pkg update` in the shell cannot change what
+   an already-open window shows. repo_entries is shared with the
+   update/fetch paths, so browse_entry is only valid between a
+   browse_load and any repo update — the window's open-time copy
+   is what makes that window safe. */
+static int browse_count = -1;
+
+int pkg_repo_config_url(char *url, u32 url_max) {
+    if (!url || url_max == 0) return -1;
+    return repo_read_config(url, url_max);
+}
+
+int pkg_repo_browse_load(u32 *version_out) {
+    int n = repo_load_stored(version_out, repo_entries, REPO_MAX_ENTRIES);
+    browse_count = n;
+    return n;
+}
+
+int pkg_repo_browse_entry(int idx, char *name, char *version) {
+    if (idx < 0 || !name || !version) return -1;
+    if (browse_count < 0 || idx >= browse_count) return -1;
+    int i = 0; while (i < 31 && repo_entries[idx].name[i]) { name[i] = repo_entries[idx].name[i]; i++; } name[i] = 0;
+    i = 0; while (i < 15 && repo_entries[idx].version[i]) { version[i] = repo_entries[idx].version[i]; i++; } version[i] = 0;
+    return 0;
+}
+
 int pkg_repo_set(const char *url) {
     if (!fs_mounted()) { console_write("pkg: no filesystem\n"); return -1; }
-    if (!url || !url[0]) { console_write("Usage: pkg repo <host[:port][/prefix]>\n"); return -1; }
+    if (!url || !url[0]) { console_write("Usage: pkg repo [http://|https://|httpsa://]<host[:port][/prefix]>\n"); return -1; }
     if (strlen(url) >= 128) { console_write("pkg repo: URL too long\n"); return -1; }
     char host[64], prefix[64]; u16 port = 80;
-    if (repo_parse_url(url, host, sizeof(host), &port, prefix, sizeof(prefix)) != 0) {
+    if (repo_parse_url(url, host, sizeof(host), &port, prefix, sizeof(prefix), 0) != 0) {
         console_write("pkg repo: malformed repository URL\n"); return -1;
     }
     if (fs_write("repo.txt", (const u8 *)url, strlen(url), 0, 0600) != 0) {
@@ -1356,8 +1456,8 @@ int pkg_repo_update(void) {
     if (repo_read_config(url, sizeof(url)) != 0) {
         console_write("pkg update: no repository set (pkg repo <host[:port][/prefix]> first)\n"); return -1;
     }
-    char host[64], prefix[64]; u16 port = 80;
-    if (repo_parse_url(url, host, sizeof(host), &port, prefix, sizeof(prefix)) != 0) {
+    char host[64], prefix[64]; u16 port = 80; int use_tls = 0;
+    if (repo_parse_url(url, host, sizeof(host), &port, prefix, sizeof(prefix), &use_tls) != 0) {
         console_write("pkg update: stored repository URL is malformed\n"); return -1;
     }
     /* Stored version FIRST: repo_load_stored reuses repo_idx /
@@ -1380,7 +1480,10 @@ int pkg_repo_update(void) {
         while (*fn) path[pi++] = *fn++;
         path[pi] = 0;
     }
-    int ilen = net_http_get(host, port, path, repo_idx, sizeof(repo_idx) - 1);
+    int ilen = repo_net_get(host, port, path, repo_idx, sizeof(repo_idx) - 1, use_tls);
+    if (ilen == -2) {
+        console_write("pkg update: repository certificate refused\n"); return -1;
+    }
     if (ilen < 0 || net_fetch_truncated()) {
         console_write("pkg update: cannot fetch repository index\n"); return -1;
     }
@@ -1391,7 +1494,10 @@ int pkg_repo_update(void) {
         if (pl + 4 >= sizeof(path)) { console_write("pkg update: path too long\n"); return -1; }
         path[pl++] = '.'; path[pl++] = 's'; path[pl++] = 'i'; path[pl++] = 'g'; path[pl] = 0;
     }
-    int slen = net_http_get(host, port, path, repo_sig_txt, sizeof(repo_sig_txt) - 1);
+    int slen = repo_net_get(host, port, path, repo_sig_txt, sizeof(repo_sig_txt) - 1, use_tls);
+    if (slen == -2) {
+        console_write("pkg update: repository certificate refused\n"); return -1;
+    }
     if (slen < 512 || net_fetch_truncated()) {
         console_write("pkg update: cannot fetch repository index signature\n"); return -1;
     }
@@ -1443,8 +1549,8 @@ int pkg_repo_fetch(const char *name) {
     if (fs_exists(target)) {
         console_write("pkg fetch: file already exists (remove it first)\n"); return -1;
     }
-    char host[64], prefix[64]; u16 port = 80;
-    if (repo_parse_url(url, host, sizeof(host), &port, prefix, sizeof(prefix)) != 0) {
+    char host[64], prefix[64]; u16 port = 80; int use_tls = 0;
+    if (repo_parse_url(url, host, sizeof(host), &port, prefix, sizeof(prefix), &use_tls) != 0) {
         console_write("pkg fetch: stored repository URL is malformed\n"); return -1;
     }
     char path[128];
@@ -1459,7 +1565,7 @@ int pkg_repo_fetch(const char *name) {
         while (*fn) path[pi++] = *fn++;
         path[pi] = 0;
     }
-    int bl = repo_download(host, port, path, &e);
+    int bl = repo_download(host, port, path, &e, use_tls);
     if (bl < 0) return -1;
     if (fs_write(target, pkg_buf, (u32)bl, 0, 0644) != 0) {
         console_write("pkg fetch: cannot save package file\n"); return -1;
@@ -1479,8 +1585,8 @@ int pkg_repo_install(const char *name) {
     if (repo_find(name, &e) != 0) {
         console_write("pkg install: package not in repository index (run pkg update)\n"); return -1;
     }
-    char host[64], prefix[64]; u16 port = 80;
-    if (repo_parse_url(url, host, sizeof(host), &port, prefix, sizeof(prefix)) != 0) {
+    char host[64], prefix[64]; u16 port = 80; int use_tls = 0;
+    if (repo_parse_url(url, host, sizeof(host), &port, prefix, sizeof(prefix), &use_tls) != 0) {
         console_write("pkg install: stored repository URL is malformed\n"); return -1;
     }
     char path[128];
@@ -1499,7 +1605,7 @@ int pkg_repo_install(const char *name) {
     if (fs_exists(tmp)) {
         console_write("pkg install: temporary file collision\n"); return -1;
     }
-    int bl = repo_download(host, port, path, &e);
+    int bl = repo_download(host, port, path, &e, use_tls);
     if (bl < 0) return -1;
     if (fs_write(tmp, pkg_buf, (u32)bl, 0, 0644) != 0) {
         console_write("pkg install: temporary file write failed\n");
