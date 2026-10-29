@@ -8,6 +8,77 @@
 > contemporary notes, and no test result is claimed here beyond what
 > those reports record. Entries 0.1.0–0.2.0 are the original notes.
 
+## 1.1.3 — Accumulation release: desktop/core/terminal fixes + web/SSL Phases 1–2 + shell grouping + 3 new apps
+
+- Desktop/core/terminal fixes (from the user's 2026-10-28 QEMU/KVM
+  report): Web-open kernel panic — user page tables lacked the
+  e1000 MMIO entry and the scheduler never restored the kernel
+  page directory, so post-tick kernel code faulted on a device
+  read; fixed by restoring the kernel PD in `run_process` (plus
+  CR3 printed on faults). Blank app windows — the desktop redraw
+  erased app bodies without queuing EXPOSE; EXPOSE is now queued
+  for intersecting user windows. Terminal-as-background — console
+  output painted glyphs during desktop; framebuffer console output
+  is now suppressed while the desktop is active (serial + text
+  buffer unaffected, panic repaints first). Added: 100-line
+  scrollback ring (PgUp/PgDn), E0 scancode delivery, list views
+  for ls/jobs/pkg list (row formats pinned, header + footer-count
+  lines added), new `echo` + `ver` commands.
+- Web/SSL Phase 1: ChaCha20 CSPRNG (RFC 8439 vector cross-checked;
+  seeded from RTC + input timing + MAC uniqueness, no RDRAND
+  assumption) wired into every crypto call site; CA store
+  (`castore.txt`, root-owned; RSA-2048 + EC256: lines; new trust
+  mode `httpss` ending the path at the first store member);
+  store update (`castore add` / `castore update` over anchored
+  HTTPS with vendor-signature verification); TOFU prints
+  (`tofuprints.txt`: first accepted leaf per host pinned, a
+  different leaf later is a hard refusal). See docs/WEB_SSL.md.
+- Web/SSL Phase 2: TLS 1.3 client (HKDF, AES-128-GCM, ECDHE
+  P-256, RSA + ECDSA certificates, SNI, ALPN http/1.1, no
+  0-RTT/PSK, HRR fails closed); ECDSA for TLS 1.2 (suite
+  0xC02B) and EC256: store/anchor lines. Default offers TLS
+  1.3 + 1.2 only, no silent downgrade, both DOWNGRD sentinel
+  values refused. See docs/WEB_SSL.md.
+- Shell grouping + per-command help (user's 2026-10-28 rule):
+  10 pure groups (system, session, fs, proc, pkg, net, crypto,
+  diag, gui, test), data-driven help table (~110 entries); bare
+  `help` = group index, `help <group>` = listing,
+  `help <command>` = dedicated entry; grouped dispatch
+  (`net <cmd>`, `test <cmd>`, ...; `pkg` keeps its own
+  dispatch + gains `pkg help`, `pkg sysupdate`,
+  `pkg sysrollback`). Every flat name still works (declared
+  aliases); removing flat names needs a user order + harness
+  updates.
+- Three new built-in desktop apps (launcher third column):
+  Calendar (RTC month grid, prev/next, today highlight,
+  day-select), Stopwatch (start/stop, reset, 8 laps,
+  MM:SS.t), Notes (`notes.txt`, list/scroll, add/delete,
+  reloads from disk).
+- Release security pass found + fixed one exploitable bug
+  before shipping: a u32 wraparound in the DER parser
+  (`der_tlv` bound check) let a crafted certificate Name
+  length near 2^32 pass and hand callers a ~4 GiB length —
+  a malicious server certificate could panic the kernel.
+  Fixed with wrap-proof subtraction-form bounds; retested
+  by host test `tests/host_der_tlv.c` (11/11; 3/11 fail on
+  the vulnerable code) and QEMU test
+  `tests/qemu_test_tls13_wrappedcert.py` (guest refuses
+  exactly at Certificate parsing, stage 2, no panic).
+  Full report: `releases/v1.1.3/SECURITY_REPORT.md`.
+- Full regression on the release ISO: 87/87 PASS (Phase A
+  28/28, Phase B 48/48, Phase C 11/11). The
+  `desktop_fallback` suite passed on a hardened re-run (the
+  test now waits for the full fb30 line before terminating
+  QEMU — a stricter check; see
+  `releases/v1.1.3/TEST_REPORT.md`). Full report:
+  `releases/v1.1.3/TEST_REPORT.md`.
+- NOT TESTED (honest): live Vercel guest fetch from the kernel
+  (peer-harness proof only); user-side Virt-Manager retests
+  (repo commands, desktop fixes, Phase 2 TLS 1.3); Bochs
+  re-run for v1.1.x trees; real hardware; tampered-
+  CertificateVerify negative (not yet built); legacy
+  SSLv2/v3/TLS 1.1 (Phases 3/4, no run order yet).
+
 ## 1.1.2 — Patch release: TLS chain fix for the live repo host
 
 - The user reported on v1.1.1 that `pkg repo

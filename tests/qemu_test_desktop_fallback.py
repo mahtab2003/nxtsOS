@@ -14,6 +14,13 @@ fallback with a stale old position (0,0) while the saved cursor
 sits at the Web row (300,432), and samples the scene in the
 SAME step (before any clock refresh can repaint over it):
   fb30: saved=(300,432) bg=0x183050 green=0 web=1
+Wait condition (hardened for the 1.1.3 ship gate): the harness
+waits for the FULL fb30 line in the serial log before
+terminating QEMU. Waiting only for the "fb30:" prefix let a
+timer tick suspend the print mid-line while the harness's poll
+observed prefix-only and killed QEMU, truncating the verdict
+line — a harness race, not a kernel bug. If the full line never
+arrives within the timeout, the test FAILS (fail closed).
 Assertions: saved proves the fallback path was really taken
 (not the restore path); bg must be the Classic desktop
 background (NOT green); green is a strided full-frame count of
@@ -36,6 +43,12 @@ SERIAL = os.path.join(WORK, "serial.log")
 MON = os.path.join(WORK, "mon.sock")
 
 KEYMAP = {" ": "spc", ".": "dot", "-": "minus", "_": "shift-minus"}
+
+# Full verdict line, reused as the wait predicate: QEMU is only
+# terminated once this matches, so the verdict line can never be
+# cut mid-print by the harness itself.
+FB30_RE = re.compile(r"fb30: saved=\((-?\d+),(-?\d+)\) bg=0x([0-9a-f]+) "
+                     r"green=(\d+) web=(\d+)")
 
 
 def log_text():
@@ -81,7 +94,8 @@ try:
             s.sendall(f"sendkey {KEYMAP.get(ch, ch)}\n".encode())
             time.sleep(0.2)
         s.sendall(b"sendkey ret\n")
-        if not wait_for(lambda t: "fb30:" in t, 60, "fb30 marker"):
+        if not wait_for(lambda t: FB30_RE.search(t) is not None, 60,
+                        "full fb30 line"):
             ok = False
         s.close()
 finally:
@@ -92,8 +106,7 @@ finally:
         qemu.kill()
 
 log = log_text()
-m = re.search(r"fb30: saved=\((-?\d+),(-?\d+)\) bg=0x([0-9a-f]+) "
-              r"green=(\d+) web=(\d+)", log)
+m = FB30_RE.search(log)
 if not m:
     print("FAIL: no fb30 marker in serial log")
     ok = False

@@ -289,21 +289,26 @@ class SslPeer(NetPeer):
     """Full TLS server via python ssl, serving routes.
     chain_files: list of (cert, key). Connection i is served
     chain_files[min(i, len-1)], so one boot can present a
-    different leaf on a later fetch (TOFU mismatch case)."""
+    different leaf on a later fetch (TOFU mismatch case).
+    min_version/max_version/ciphers override the TLS 1.2 default
+    (used by the TLS 1.3 suite); negotiated records (version,
+    cipher) per connection for the test to assert on."""
 
-    def __init__(self, chain_files, routes, listen_port, debug_path=None):
+    def __init__(self, chain_files, routes, listen_port, debug_path=None,
+                 min_version=None, max_version=None, ciphers=None):
         self.ctxs = []
         for cert_path, key_path in chain_files:
             ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-            ctx.maximum_version = ssl.TLSVersion.TLSv1_2
-            ctx.set_ciphers("AES128-GCM-SHA256")
+            ctx.minimum_version = min_version if min_version is not None else ssl.TLSVersion.TLSv1_2
+            ctx.maximum_version = max_version if max_version is not None else ssl.TLSVersion.TLSv1_2
+            ctx.set_ciphers(ciphers if ciphers is not None else "AES128-GCM-SHA256")
             ctx.load_cert_chain(cert_path, key_path)
             ctx.set_alpn_protocols(["http/1.1"])
             self.ctxs.append(ctx)
         self.routes = routes
         self.ssl_errors = []
         self.conn_count = 0
+        self.negotiated = []
         super().__init__(listen_port, debug_path)
 
     def tls_reset(self):
@@ -313,6 +318,7 @@ class SslPeer(NetPeer):
         self.ssl_done = False
         self.app_buf = b""
         self.responded = False
+        self.neg_recorded = False
 
     def tls_new_connection(self):
         self.ssl_in = ssl.MemoryBIO()
@@ -328,6 +334,14 @@ class SslPeer(NetPeer):
             if not self.ssl_done:
                 self.sslobj.do_handshake()
                 self.ssl_done = True
+                if not self.neg_recorded:
+                    self.neg_recorded = True
+                    try:
+                        self.negotiated.append(
+                            (self.sslobj.version(),
+                             (self.sslobj.cipher() or [None])[0]))
+                    except Exception:
+                        pass
         except ssl.SSLWantReadError:
             pass
         except ssl.SSLError as e:

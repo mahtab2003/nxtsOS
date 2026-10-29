@@ -207,18 +207,45 @@ anything against it):**
   past the anchor. A chain containing no pinned
   anchor fails with -2, as does any chain whose links
   up to the anchor do not verify.
-- **Randomness is a timer/MAC-seeded xorshift32, NOT
-  a cryptographic RNG.** This is the release's weakest
-  link: premaster secrets, ClientHello randoms and the
-  TCP ISN (ticks * 0x9E3779B9 ^ 0x12345678) are
-  predictable to anyone who can observe timing. Fine
-  for lab tests, NOT for real secrets.
-- No session resumption, no client certificates, no
-  revocation checking, no TLS 1.3. ALPN is offered
-  (http/1.1) but the server's selection is not
-  parsed. GCM tag comparison is not constant-time
-  (the tag is not a secret key, and this is a lab
-  client).
+- **Store `httpss` (Phase 1, v1.1.3) validates against
+  a root-owned CA store instead.** The chain must
+  CONTAIN a store member: an RSA-2048 modulus listed
+  in `castore.txt` (one 512-hex-char modulus per
+  line, exponent 65537; blank lines and `#` comments
+  skipped) or an `EC256:` P-256 point line (Phase 2).
+  Validation stops at the FIRST store member, exactly
+  like anchored mode stops at the pin; certificates
+  after it are ignored. The store is parsed on demand
+  per connection (windowed scan, so stores up to the
+  65535-byte bundle cap verify). `castore add <file>`
+  (root, manual) and `castore update <host>` (root;
+  fetches `/castore.txt` + `/castore.txt.sig` over
+  anchored HTTPS and verifies the vendor signature
+  with the package trust anchors) manage it; no
+  production bundle is published yet. TOFU prints
+  (`tofuprints.txt`, root-owned) pin the first
+  accepted leaf per host for plain `https`: a
+  different leaf later is a hard refusal.
+- **Randomness is a ChaCha20 CSPRNG (Phase 1,
+  v1.1.3), NOT xorshift.** All crypto call sites
+  (client random, ECDHE private keys, session ids,
+  premaster secrets, user salts) draw from
+  `kernel/csprng.c`, seeded from CMOS RTC + PS/2
+  keyboard/mouse event timing + NIC MAC (uniqueness
+  only, never counted as secret entropy); no RDRAND
+  assumption. xorshift survives only in window-manager
+  test shuffles. Honest limit: early-boot output
+  before the first input event is only as strong as
+  RTC + boot timing + MAC uniqueness. The TCP ISN
+  (ticks * 0x9E3779B9 ^ 0x12345678) is still
+  predictable — a carried weakness, not a TLS one.
+- No session resumption (no PSK/0-RTT), no client
+  certificates, no revocation checking. TLS 1.3 IS
+  implemented (Phase 2, v1.1.3 — see docs/WEB_SSL.md).
+  ALPN is offered (http/1.1) but the server's
+  selection is not parsed. GCM tag comparison is not
+  constant-time (the tag is not a secret key, and this
+  is a lab client).
 
 CORRECTION (2026-10-28, TLS audit): the bullets
 above previously said "No CA trust store ships ...
@@ -242,6 +269,11 @@ found the register-offset bug), `dhcp`, `ping <ip>`
 a pinned anchor, validation stops there, see the TLS
 section above; prints "httpsa: certificate refused,
 connection not made" on certificate failure),
+`httpss <host> <path> [port]` (CA-store handshake —
+the chain must contain a store member, see above),
+`castore list|add|update|clear` (root-only store
+management), `tofprints list|clear` (root-only TOFU
+print management), `csprngtest` (CSPRNG sanity),
 `nettest` (10
 malformed-frame injection cases through
 `net_rx_frame`; prints `nettest PASS` when the run

@@ -167,6 +167,9 @@ static int read_line(char *buf, u32 max, int echo) {
         if (c == '\n') { console_putchar('\n'); buf[len] = 0; return (int)len; }
         if (c == '\b') {
             if (len > 0) { len--; if (echo) console_putchar('\b'); }
+        } else if (c >= 0x100) {
+            /* Special key (PgUp/PgDn): ignored here, never appended
+               (a (char) truncation would store a NUL/control byte). */
         } else if (len < max - 1) {
             buf[len++] = (char)c;
             if (echo) console_putchar((char)c);
@@ -302,14 +305,272 @@ static int do_lock(void) {
     return 0;
 }
 
+/* Shell grouping + per-command help (apps run, user rule 21:09 PKT).
+   Every command belongs to exactly one group; the table is the
+   single source for `help` output AND for group dispatch
+   (`net ping ...`, `test csprngtest`, ...). Flat names keep
+   working as aliases (see the design note in AUTONOMOUS.md);
+   the help system itself never stacks everything into one dump:
+   bare `help` is a short group index, detail lives per command.
+   Groups are pure: a group holds only its own kind (verdict-
+   printing self-tests live under test even when their topic is
+   crypto or network). Usage strings match the Usage: lines the
+   commands themselves print on error, so help and behaviour
+   cannot drift apart silently. */
+struct help_entry { const char *name; const char *group; const char *usage; const char *desc; };
+struct help_group { const char *name; const char *desc; };
+static const struct help_group help_groups[] = {
+    {"system", "System information and control"},
+    {"session", "Login session and accounts"},
+    {"fs", "Files and filesystem"},
+    {"proc", "Programs and background jobs"},
+    {"pkg", "Packages and system updates"},
+    {"net", "Network, web, and trust stores"},
+    {"crypto", "Cryptographic tools"},
+    {"diag", "Hardware diagnostics"},
+    {"gui", "Graphical interfaces"},
+    {"test", "Self-tests and autotest scripts"},
+};
+static const struct help_entry help_table[] = {
+    {"help", "system", "help [group|command]", "Show the group index, a group's commands, or one command's dedicated help."},
+    {"ver", "system", "ver", "Print the nxtsOS version (same literal build.sh checks)."},
+    {"mem", "system", "mem", "Show physical memory frames: total, free, used."},
+    {"ticks", "system", "ticks", "Show timer ticks and uptime in seconds (100 Hz)."},
+    {"clear", "system", "clear", "Clear the text console."},
+    {"echo", "system", "echo <text>", "Print text to the console."},
+    {"reboot", "system", "reboot", "Reboot immediately via the keyboard controller (no confirm, no uid check)."},
+    {"whoami", "session", "whoami", "Print the current session user and uid."},
+    {"lock", "session", "lock", "Lock the session; unlock with the session password (unavailable in setup mode)."},
+    {"unlock", "session", "unlock <user>", "Root only: clear a user's failed-login lockout."},
+    {"passwd", "session", "passwd [user]", "Change a password (root: any user; others: own only, current password required)."},
+    {"logout", "session", "logout", "Kill the session's background jobs and return to the login prompt."},
+    {"idle", "session", "idle [minutes 0-480|off]", "Show or set the idle session-lock timeout for this session (0 = never)."},
+    {"fs", "fs", "fs", "Show filesystem status (mounted, files, space)."},
+    {"ls", "fs", "ls", "List files as a list view (header, names, footer count)."},
+    {"cat", "fs", "cat <file>", "Print a whole text file, in 1023-byte windows."},
+    {"write", "fs", "write <file> <text>", "Create or overwrite a file with text."},
+    {"rm", "fs", "rm <file>", "Delete a file (permission-checked)."},
+    {"mv", "fs", "mv <old> <new>", "Rename a file."},
+    {"cp", "fs", "cp <src> <dst>", "Copy a file."},
+    {"chmod", "fs", "chmod <file> <mode>", "Set a file mode (octal, 3 digits, e.g. 600 or 0644)."},
+    {"run", "proc", "run <file>", "Run an ELF program in the foreground."},
+    {"runbg", "proc", "runbg <file>", "Start an ELF program as a background job."},
+    {"jobs", "proc", "jobs", "List background jobs as a list view (header, rows, footer count)."},
+    {"kill", "proc", "kill <pid>", "Kill a background job by pid (own jobs, or any as root)."},
+    {"pkg", "pkg", "pkg <subcommand>", "Package manager (see 'help pkg' for subcommands)."},
+    {"pkg list", "pkg", "pkg list", "List installed packages (header, rows, footer count)."},
+    {"pkg avail", "pkg", "pkg avail", "List packages available from the configured repository."},
+    {"pkg install", "pkg", "pkg install <file>|<name>", "Root only: install a local .nxpkg file, or a named package from the repo."},
+    {"pkg remove", "pkg", "pkg remove <name> [force]", "Root only: remove an installed package (force skips the dependency check)."},
+    {"pkg repo", "pkg", "pkg repo [url]", "Show the repository URL, or set it (root only). https:// is TOFU, httpsa:// is anchored, httpss:// uses the CA store."},
+    {"pkg update", "pkg", "pkg update", "Root only: refresh the repository index over anchored HTTPS."},
+    {"pkg fetch", "pkg", "pkg fetch <name>", "Root only: download a package from the repo without installing it."},
+    {"sysupdate", "pkg", "sysupdate <bundle.nxupd>", "Root only: apply a signed system-update bundle (snapshot + rollback on failure)."},
+    {"sysrollback", "pkg", "sysrollback", "Root only: roll back to the pre-update snapshot."},
+    {"netinfo", "net", "netinfo", "Show NIC MAC, counters, and IP configuration."},
+    {"netdbg", "net", "netdbg", "Dump network driver debug state."},
+    {"dhcp", "net", "dhcp", "Configure IP via DHCP (no uid gate - pre-existing, see security notes)."},
+    {"ping", "net", "ping <ip>", "Ping a dotted-quad IPv4 address; reports reply or no reply."},
+    {"dns", "net", "dns <name>", "Look up a hostname via the configured DNS server."},
+    {"dnsset", "net", "dnsset <ip>", "Set the DNS server address (no uid gate - pre-existing)."},
+    {"http", "net", "http <host> <path> [port]", "Fetch a page over plain HTTP (default port 80)."},
+    {"https", "net", "https <host> <path> [port]", "Fetch over TLS 1.3/1.2, TOFU trust (default port 443)."},
+    {"httpsa", "net", "httpsa <host> <path> [port]", "Fetch over TLS, anchored trust (pinned anchor must terminate the chain)."},
+    {"httpss", "net", "httpss <host> <path> [port]", "Fetch over TLS, CA-store trust (castore.txt)."},
+    {"castore", "net", "castore list|add <file>|update <host> [port]|clear", "Manage the CA store (root for add/update/clear)."},
+    {"castore list", "net", "castore list", "Count well-formed roots in castore.txt."},
+    {"castore add", "net", "castore add <file>", "Root only: add one store line from a file (RSA modulus or EC256: point)."},
+    {"castore update", "net", "castore update <host> [port]", "Root only: fetch a vendor-signed store bundle over anchored HTTPS and install it."},
+    {"castore clear", "net", "castore clear", "Root only: delete the CA store."},
+    {"tofprints", "net", "tofprints list|clear <host>", "Root only: list or clear pinned TOFU leaf fingerprints."},
+    {"tofprints list", "net", "tofprints list", "Root only: list pinned TOFU leaf fingerprints."},
+    {"tofprints clear", "net", "tofprints clear <host>", "Root only: clear the pinned fingerprint for one host."},
+    {"sha256", "crypto", "sha256 <file>", "Print the SHA-256 hex digest of a file (up to 64 KiB)."},
+    {"fbinfo", "diag", "fbinfo", "Show framebuffer geometry or why none is available."},
+    {"kbdstat", "diag", "kbdstat", "Show PS/2 controller status, startup-drained bytes, last scancode."},
+    {"mouse", "diag", "mouse", "Show pointer presence, position, and button state."},
+    {"mousepoll", "diag", "mousepoll", "Poll the PS/2 controller for 5 seconds, logging any bytes."},
+    {"gui", "gui", "gui", "Enter the classic window manager (Back to shell returns)."},
+    {"desktop", "gui", "desktop", "Enter the desktop (icons, launcher, taskbar, workspaces)."},
+    {"wmautotest", "test", "wmautotest", "Run the window-manager autotest (edge cases, limits)."},
+    {"guitest", "test", "guitest", "Run the classic GUI test (windows, buttons, events)."},
+    {"cursortest", "test", "cursortest", "Run the cursor rendering test."},
+    {"cliptest", "test", "cliptest", "Run the framebuffer clipping test."},
+    {"stormtest", "test", "stormtest", "Run the window-storm stress test."},
+    {"desktopautotest", "test", "desktopautotest", "Run the desktop autotest script."},
+    {"desktopsectest", "test", "desktopsectest", "Run the desktop security autotest script."},
+    {"desktopcalctest", "test", "desktopcalctest", "Run the desktop calculator autotest script."},
+    {"desktopexposetest", "test", "desktopexposetest", "Run the desktop EXPOSE-repaint test (blank-window regression)."},
+    {"desktopnoconsoletest", "test", "desktopnoconsoletest", "Run the desktop no-console-paint test (terminal-background regression)."},
+    {"desktopnewappstest", "test", "desktopnewappstest", "Run the desktop new-apps test (Calendar, Stopwatch, Notes via launcher column 3)."},
+    {"desktop10test", "test", "desktop10test", "Run the desktop Phase 10 apps autotest script."},
+    {"desktopappstest", "test", "desktopappstest", "Run the desktop apps autotest script (launcher, Editor, Files, Viewer)."},
+    {"desktop10sec", "test", "desktop10sec", "Run the desktop Phase 10 security autotest script."},
+    {"desktopwebtest", "test", "desktopwebtest", "Run the desktop Web window autotest script."},
+    {"desktopnonic", "test", "desktopnonic", "Run the desktop no-NIC behaviour test."},
+    {"desktoprepotest", "test", "desktoprepotest", "Run the desktop Repo window autotest script."},
+    {"desktoprepoapptest", "test", "desktoprepoapptest", "Run the desktop repo-apps autotest script."},
+    {"desktoppackageapptest", "test", "desktoppackageapptest", "Run the desktop package-apps autotest script."},
+    {"desktopfileinstalltest", "test", "desktopfileinstalltest", "Run the desktop file-install autotest script."},
+    {"desktopfileruntest", "test", "desktopfileruntest", "Run the desktop file-run autotest script."},
+    {"desktopmonitorjobtest", "test", "desktopmonitorjobtest", "Run the desktop Monitor jobs autotest script."},
+    {"desktopreboottest", "test", "desktopreboottest", "Run the desktop reboot-confirm autotest script."},
+    {"desktoplogouttest", "test", "desktoplogouttest", "Run the desktop logout autotest script."},
+    {"desktopfilesysupdtest", "test", "desktopfilesysupdtest", "Run the desktop file system-update autotest script."},
+    {"desktoprollbacktest", "test", "desktoprollbacktest", "Run the desktop rollback autotest script."},
+    {"desktopreposettest", "test", "desktopreposettest", "Run the desktop repo-set autotest script."},
+    {"desktopdnssettest", "test", "desktopdnssettest", "Run the desktop DNS-set autotest script."},
+    {"desktopnetpingtest", "test", "desktopnetpingtest", "Run the desktop network-ping autotest script."},
+    {"desktoprepofetchtest", "test", "desktoprepofetchtest", "Run the desktop repo-fetch autotest script."},
+    {"desktopfileshashtest", "test", "desktopfileshashtest", "Run the desktop file-hash autotest script."},
+    {"desktopmonitordisktest", "test", "desktopmonitordisktest", "Run the desktop Monitor disk autotest script."},
+    {"desktopwebsavetest", "test", "desktopwebsavetest", "Run the desktop Web save autotest script."},
+    {"desktopfileschmodtest", "test", "desktopfileschmodtest", "Run the desktop file-chmod autotest script."},
+    {"desktopreporoottest", "test", "desktopreporoottest", "Run the desktop repo root-gate autotest script."},
+    {"desktopsettingsunlocktest", "test", "desktopsettingsunlocktest", "Run the desktop Settings unlock autotest script."},
+    {"desktopunlocknousertest", "test", "desktopunlocknousertest", "Run the desktop unlock-no-such-user autotest script."},
+    {"desktopfallbacktest", "test", "desktopfallbacktest", "Run the desktop fallback-redraw autotest script (green-screen regression)."},
+    {"csprngtest", "test", "csprngtest", "Run the CSPRNG self-test (ChaCha20 vector + sanity)."},
+    {"nettest", "test", "nettest", "Run the network stack self-test."},
+    {"hostmatch", "test", "hostmatch", "Run the TLS hostname-matching self-test."},
+    {"mousetest", "test", "mousetest", "Run the PS/2 mouse driver self-test (injected packets)."},
+    {"aes-test", "test", "aes-test", "Run the AES-256 FIPS 197 vector test."},
+};
+#define HELP_NGROUPS (sizeof(help_groups) / sizeof(help_groups[0]))
+#define HELP_NENTRIES (sizeof(help_table) / sizeof(help_table[0]))
+static int help_group_index(const char *name) {
+    for (u32 i = 0; i < HELP_NGROUPS; i++)
+        if (strcmp(help_groups[i].name, name) == 0) return (int)i;
+    return -1;
+}
+static const struct help_entry *help_find(const char *name) {
+    for (u32 i = 0; i < HELP_NENTRIES; i++)
+        if (strcmp(help_table[i].name, name) == 0) return &help_table[i];
+    return 0;
+}
+static const struct help_entry *help_find_in_group(const char *group, const char *name) {
+    for (u32 i = 0; i < HELP_NENTRIES; i++)
+        if (strcmp(help_table[i].group, group) == 0 && strcmp(help_table[i].name, name) == 0) return &help_table[i];
+    return 0;
+}
+static void help_print_entry(const struct help_entry *e) {
+    console_printf("%s (%s)\n  Usage: %s\n  %s\n", e->name, e->group, e->usage, e->desc);
+}
+static void help_print_group(const char *group) {
+    int gi = help_group_index(group);
+    if (gi < 0) return;
+    console_printf("Group %s: %s\n", group, help_groups[gi].desc);
+    for (u32 i = 0; i < HELP_NENTRIES; i++) {
+        if (strcmp(help_table[i].group, group) != 0) continue;
+        /* Subcommand entries (e.g. "pkg list") print as their own
+           rows, so the group listing is complete. */
+        console_printf("  %s: %s\n", help_table[i].name, help_table[i].desc);
+    }
+}
+static void help_print_index(void) {
+    console_write("Command groups: system, session, fs, proc, pkg, net, crypto, diag, gui, test\n");
+    for (u32 i = 0; i < HELP_NGROUPS; i++)
+        console_printf("  %s: %s\n", help_groups[i].name, help_groups[i].desc);
+    console_write("Type 'help <group>' for a group's commands, or 'help <command>' for one command's details.\n");
+    console_write("Groups also dispatch: 'net ping <ip>', 'test csprngtest', 'fs ls', and so on. Flat names still work.\n");
+}
+/* First word of rest (rest holds text after the second token).
+   Returns 1 and fills out (NUL-terminated, capped) if present. */
+static int help_first_word(const char *rest, char *out, u32 cap) {
+    if (!rest) return 0;
+    while (*rest == ' ') rest++;
+    if (*rest == 0) return 0;
+    u32 i = 0;
+    while (rest[i] && rest[i] != ' ' && i < cap - 1) { out[i] = rest[i]; i++; }
+    out[i] = 0;
+    return 1;
+}
+
 /* Returns 1 if the shell loop should exit (logout). */
 static int execute(char *line) {
     char *tok[4];
     char *rest = 0;
     int n = tokenize(line, tok, &rest);
     if (n == 0) return 0;
+    /* Group dispatch (shell grouping): `net ping <ip>`,
+       `test csprngtest`, `fs ls`, and so on rewrite to the flat
+       command and run once. `pkg` is excluded: it already has
+       its own subcommand dispatch, and rewriting "pkg list"
+       to "list" would hit "Unknown command". Group dispatch
+       only fires with a member subcommand, so bare `fs` keeps
+       printing fs status and bare `gui` keeps opening the
+       classic GUI, exactly as before. The rebuilt line is
+       strictly shorter than the input line, so recursion
+       terminates (at most one rewrite: the rebuilt line's
+       first word is a command, and only fs/gui are both a
+       group and a command, where the rebuilt line has n<2
+       or hits the flat branch). */
+    if (n >= 2 && help_group_index(tok[0]) >= 0 && strcmp(tok[0], "pkg") != 0) {
+        if (strcmp(tok[1], "help") == 0) {
+            char first[32];
+            if (help_first_word(rest, first, sizeof(first))) {
+                const struct help_entry *e = help_find_in_group(tok[0], first);
+                if (e) help_print_entry(e);
+                else help_print_group(tok[0]);
+            } else help_print_group(tok[0]);
+            return 0;
+        }
+        if (help_find_in_group(tok[0], tok[1])) {
+            char line2[128];
+            int li = 0;
+            const char *p = tok[1];
+            while (*p && li < 120) line2[li++] = *p++;
+            if (rest && rest[0]) {
+                line2[li++] = ' ';
+                p = rest;
+                while (*p && li < 127) line2[li++] = *p++;
+            }
+            line2[li] = 0;
+            return execute(line2);
+        }
+        /* Not a member: fall through to flat dispatch, so e.g.
+           "fs foo" still prints fs status as it always did. */
+    }
     if (strcmp(tok[0], "help") == 0) {
-        console_write("Commands: help, mem, ticks, clear, reboot, fs, ls, cat <file>, write <file> <text>, rm <file>, mv <old> <new>, cp <src> <dst>, chmod <file> <mode>, run <file>, runbg <file>, jobs, kill <pid>, lock, unlock <user>, passwd [user], whoami, logout, idle [minutes|off], fbinfo, kbdstat, pkg list, pkg avail, pkg install <file>, pkg install <name>, pkg remove <name>, pkg remove <name> force, pkg repo [url], pkg update, pkg fetch <name>, sysupdate <bundle>, sysrollback, sha256 <file>, aes-test, gui, wmautotest, guitest, cursortest, cliptest, stormtest, desktop, desktopautotest, desktopsectest, desktopcalctest, desktop10test, desktopappstest, desktop10sec, desktopwebtest, desktopnonic, desktoprepotest, desktoprepoapptest, desktoppackageapptest, desktopfileinstalltest, desktopfileruntest, desktopmonitorjobtest, desktopreboottest, desktoplogouttest, desktopfilesysupdtest, desktoprollbacktest, desktopreposettest, desktopdnssettest, desktopnetpingtest, desktoprepofetchtest, desktopfileshashtest, desktopmonitordisktest, desktopwebsavetest, desktopfileschmodtest, desktopreporoottest, desktopsettingsunlocktest, desktopunlocknousertest, desktopfallbacktest, mouse, mousetest, mousepoll, netinfo, netdbg, dhcp, ping <ip>, dns <name>, dnsset <ip>, http <host> <path>, https <host> <path>, httpsa <host> <path>, httpss <host> <path>, castore list|add|update|clear, tofprints list|clear, csprngtest, nettest, hostmatch\n");
+        if (n < 2) {
+            help_print_index();
+        } else if (help_group_index(tok[1]) >= 0) {
+            char first[32];
+            if (help_first_word(rest, first, sizeof(first))) {
+                /* Try "group sub" (e.g. "pkg install") first, then
+                   a plain member name (e.g. "net ping"). */
+                char combined[64];
+                int ci = 0;
+                const char *p = tok[1];
+                while (*p && ci < 30) combined[ci++] = *p++;
+                combined[ci++] = ' ';
+                p = first;
+                while (*p && ci < 63) combined[ci++] = *p++;
+                combined[ci] = 0;
+                const struct help_entry *e = help_find(combined);
+                if (!e) e = help_find_in_group(tok[1], first);
+                if (e) help_print_entry(e);
+                else help_print_group(tok[1]);
+            } else help_print_group(tok[1]);
+        } else {
+            /* Try "cmd sub" (pkg/castore/tofprints), then cmd. */
+            char first[32];
+            const struct help_entry *e = 0;
+            if (help_first_word(rest, first, sizeof(first))) {
+                char combined[64];
+                int ci = 0;
+                const char *p = tok[1];
+                while (*p && ci < 30) combined[ci++] = *p++;
+                combined[ci++] = ' ';
+                p = first;
+                while (*p && ci < 63) combined[ci++] = *p++;
+                combined[ci] = 0;
+                e = help_find(combined);
+            }
+            if (!e) e = help_find(tok[1]);
+            if (e) help_print_entry(e);
+            else console_printf("help: no such command or group '%s' (type help)\n", tok[1]);
+        }
     } else if (strcmp(tok[0], "idle") == 0) {
         if (n < 2) {
             if (idle_timeout_minutes == 0) console_write("Idle timeout: disabled (never locks on idle)\n");
@@ -355,6 +616,18 @@ static int execute(char *line) {
                        timer_ticks, timer_ticks / 100);
     } else if (strcmp(tok[0], "clear") == 0) {
         console_clear();
+    } else if (strcmp(tok[0], "echo") == 0) {
+        /* tokenize() splits the text into tok[1] + rest, so rejoin
+           with one space; bare `echo` prints just a newline. */
+        if (n >= 2) {
+            console_write(tok[1]);
+            if (rest && rest[0]) { console_putchar(' '); console_write(rest); }
+        }
+        console_putchar('\n');
+    } else if (strcmp(tok[0], "ver") == 0) {
+        /* Version literal, kept in sync by build.sh's VERSION check
+           (same grep as the main.c banner and the wm.c About text). */
+        console_write("nxtsOS v1.1.3\n");
     } else if (strcmp(tok[0], "reboot") == 0) {
         console_write("Rebooting...\n");
         outb(0x64, 0xFE);
@@ -553,6 +826,38 @@ static int execute(char *line) {
            `rest`, so pkg subcommand arguments come from `rest`, not
            tok[2]/tok[3]. */
         if (n < 2) { console_write("Usage: pkg list | pkg avail | pkg install <file> | pkg install <name> | pkg remove <name> [force] | pkg repo [url] | pkg update | pkg fetch <name>\n"); return 0; }
+        if (strcmp(tok[1], "help") == 0) {
+            char first[32];
+            if (help_first_word(rest, first, sizeof(first))) {
+                char combined[64];
+                int ci = 0;
+                const char *p = "pkg";
+                while (*p && ci < 30) combined[ci++] = *p++;
+                combined[ci++] = ' ';
+                p = first;
+                while (*p && ci < 63) combined[ci++] = *p++;
+                combined[ci] = 0;
+                const struct help_entry *e = help_find(combined);
+                if (e) help_print_entry(e);
+                else console_write("Usage: pkg list | pkg avail | pkg install <file> | pkg install <name> | pkg remove <name> [force] | pkg repo [url] | pkg update | pkg fetch <name>\n");
+            } else help_print_group("pkg");
+            return 0;
+        }
+        if (strcmp(tok[1], "sysupdate") == 0) {
+            /* pkg-group alias for the top-level sysupdate: same
+               root rule, same bundle argument (first word only,
+               as the flat command takes exactly tok[1]). */
+            char first[32];
+            if (!help_first_word(rest, first, sizeof(first))) { console_write("Usage: sysupdate <bundle.nxupd>\n"); return 0; }
+            if (session_uid != 0) { console_write("sysupdate: root only\n"); return 0; }
+            pkg_sysupdate(first);
+            return 0;
+        }
+        if (strcmp(tok[1], "sysrollback") == 0) {
+            if (session_uid != 0) { console_write("sysrollback: root only\n"); return 0; }
+            pkg_sysrollback();
+            return 0;
+        }
         if (strcmp(tok[1], "list") == 0) {
             pkg_list();
         } else if (strcmp(tok[1], "avail") == 0) {
@@ -619,6 +924,12 @@ static int execute(char *line) {
         wm_desktop_sectest();
     } else if (strcmp(tok[0], "desktopcalctest") == 0) {
         wm_desktop_calctest();
+    } else if (strcmp(tok[0], "desktopexposetest") == 0) {
+        wm_desktop_exposetest();
+    } else if (strcmp(tok[0], "desktopnoconsoletest") == 0) {
+        wm_desktop_noconsoletest();
+    } else if (strcmp(tok[0], "desktopnewappstest") == 0) {
+        wm_desktop_newappstest();
     } else if (strcmp(tok[0], "desktop10test") == 0) {
         wm_desktop_p10test();
     } else if (strcmp(tok[0], "desktopappstest") == 0) {
@@ -1088,7 +1399,13 @@ static int shell_loop(void) {
                 continue;
             }
             last_activity = timer_ticks;
-            if (c == '\n') {
+            /* Scroll keys (Work D): PgUp/PgDn page the scrollback
+               ring; any other special code is ignored, and only
+               printable ASCII reaches the line buffer (a special
+               code truncated to char would store a NUL byte). */
+            if (c == KEY_PGUP) { console_scroll_up(); }
+            else if (c == KEY_PGDN) { console_scroll_down(); }
+            else if (c == '\n') {
                 line[len] = 0;
                 console_putchar('\n');
                 int should_logout = execute(line);
@@ -1101,7 +1418,7 @@ static int shell_loop(void) {
                 break;
             } else if (c == '\b') {
                 if (len > 0) { len--; console_putchar('\b'); }
-            } else if (len < sizeof(line) - 1) {
+            } else if (c >= 32 && c < 127 && len < sizeof(line) - 1) {
                 line[len++] = (char)c;
                 console_putchar((char)c);
             }

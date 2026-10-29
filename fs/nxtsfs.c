@@ -213,15 +213,25 @@ u32 fs_total_sectors(void) {
 
 int fs_list_as(u32 uid) {
     if (!mounted) return -1;
+    /* List view (Work D): header + name column padded to 24 + footer
+       count. Row fields keep their established text; the zero-case
+       line is preserved verbatim. */
+    console_write("NAME                    SIZE  UID  MODE\n");
     int count = 0;
     for (int i = 0; i < FS_MAX_FILES; i++) {
         if (!valid_entry(&dir[i])) continue;
         if (!can_read_entry(&dir[i], uid)) continue;
-        console_printf("%s  %u bytes  uid %u  mode %u\n",
-                       dir[i].name, dir[i].size, dir[i].uid, dir[i].mode);
+        console_write(dir[i].name);
+        int nl = 0;
+        while (dir[i].name[nl] && nl < 32) nl++;
+        for (int s = nl; s < 24; s++) console_putchar(' ');
+        if (nl >= 24) console_putchar(' ');
+        console_printf("%u bytes  uid %u  mode %u\n",
+                       dir[i].size, dir[i].uid, dir[i].mode);
         count++;
     }
     if (count == 0) console_write("(no files)\n");
+    else console_printf("(%u files)\n", count);
     return count;
 }
 int fs_list(void) { return fs_list_as(0); }

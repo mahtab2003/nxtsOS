@@ -112,9 +112,21 @@ for a, b in [("alpha.txt", "beta.txt"), ("bin.dat", "bin2.dat")]:
     print(f"{'PASS' if good else 'FAIL'}: sha256 {a} == sha256 {b} ({hashes.get(a)} vs {hashes.get(b)})")
     ok = ok and good
 final_ls = log[before_final_ls:]
-for m in ["alpha.txt", "beta.txt  14 bytes", "bin2.dat  256 bytes"]:
+for m in ["alpha.txt"]:
     found = m in final_ls
     print(f"{'PASS' if found else 'FAIL'}: final ls shows {m}")
+    ok = ok and found
+# List-view format (Work D, v1.1.3): ls pads the name column to 24,
+# so "beta.txt" is followed by 16 spaces, not 2 as in the old
+# "%s  %u bytes" format. Match name + one-or-more spaces + size:
+# same assertion (row present with the right size), valid on both
+# formats. The old exact-2-space substrings failed on the new
+# layout even though the rows were present and correct (cp itself
+# is proven by the Copied markers + identical sha256 hashes above).
+for pat, desc in [(r"beta\.txt +14 bytes", "beta.txt 14 bytes"),
+                  (r"bin2\.dat +256 bytes", "bin2.dat 256 bytes")]:
+    found = re.search(pat, final_ls) is not None
+    print(f"{'PASS' if found else 'FAIL'}: final ls shows {desc}")
     ok = ok and found
 for m in ["EXCEPTION", "PANIC", "page fault"]:
     check(m, False)

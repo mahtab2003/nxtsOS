@@ -90,6 +90,8 @@ echo "--- version check ---"
 grep -q "nxtsOS v$(cat VERSION)" kernel/main.c || { echo "version mismatch: kernel/main.c does not match VERSION"; exit 1; }
 # Same guard for the desktop About window literal (Phase 8).
 grep -q "nxtsOS v$(cat VERSION)" kernel/wm.c || { echo "version mismatch: kernel/wm.c About literal does not match VERSION"; exit 1; }
+# Same guard for the shell `ver` literal (Work D).
+grep -q "nxtsOS v$(cat VERSION)" kernel/shell.c || { echo "version mismatch: kernel/shell.c ver literal does not match VERSION"; exit 1; }
 echo "--- compiling kernel ---"
 gcc $CFLAGS -c boot/boot.S -o build/boot.o
 gcc $CFLAGS -c drivers/isr.S -o build/isr.o

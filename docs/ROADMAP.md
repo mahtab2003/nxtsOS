@@ -463,17 +463,20 @@ with test + security reports exists in `releases/`.
   device in sandbox); improvement is argued from pixel
   counts, not a phone fps number.
 
-Current release: **v1.1.2 = patch release over v1.1.1: TLS
-certificate-chain verification fix for the live package
-repository host — anchored verification now terminates at the
-first pinned anchor and TOFU truncates at the first oversize-key
-certificate, so Vercel's 3-cert chain (leaf + WR1 + 4096-bit R1)
-no longer fails with "certificate refused" — plus the new
-tls_anchor_stop suite (8/8, exact live chain)**. Next: **queued
-web/SSL work** per the standing direction below (a due release
-must ship on its own as soon as work is release-worthy — never
-deferred behind audit/polish chunks, never waiting for the user
-to ask).
+Current release: **v1.1.3 = accumulation release over v1.1.2:
+desktop/core/terminal fixes (Web-open panic, blank app
+windows, terminal-as-background, scrollback, list views),
+web/SSL Phase 1 (CSPRNG, CA store, TOFU prints) + Phase 2
+(TLS 1.3 + ECDSA), shell grouping with per-command help,
+three new desktop apps (Calendar, Stopwatch, Notes) — plus
+a release-security-pass fix for a DER parser integer
+wraparound that a malicious server certificate could have
+used to panic the kernel**. Next: **legacy web/SSL
+Phases 3/4 (TLS 1.1/SSLv3/SSLv2-Hello + HTTP layer) and
+further desktop apps**, per the post-release plan (a due
+release must ship on its own as soon as work is
+release-worthy — never deferred behind audit/polish
+chunks, never waiting for the user to ask).
 
 ## Standing direction (updated by the user 2026-10-27 — adds to
 all previous instructions, does not replace them)

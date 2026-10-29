@@ -382,12 +382,17 @@ int pkg_registry_entry(int idx, char *name, char *version) {
 int pkg_list(void) {
     if (registry_load() != 0) { console_write("pkg: no filesystem\n"); return -1; }
     if (reg_count == 0) { console_write("(no packages installed)\n"); return 0; }
+    /* List view (Work D): header + footer count around the pinned
+       row format (`%s %s  depends: %s  files: %u`, relied on by
+       tests); the zero-case line is preserved verbatim. */
+    console_write("NAME  VERSION  DEPENDS  FILES\n");
     for (int i = 0; i < reg_count; i++) {
         console_printf("%s %s  depends: %s  files: %u\n",
                        registry[i].name, registry[i].version,
                        registry[i].depends[0] ? registry[i].depends : "(none)",
                        registry[i].nfiles);
     }
+    console_printf("(%u packages)\n", reg_count);
     return reg_count;
 }
 

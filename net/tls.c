@@ -1,7 +1,7 @@
 /* TLS 1.3 + TLS 1.2 client (Phases 9.2, web/SSL Phase 2).
    Suites: TLS_AES_128_GCM_SHA256 (0x1301, TLS 1.3 only),
    ECDHE_RSA_WITH_AES_128_GCM_SHA256 (0xC02F),
-   ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 (0xC00A),
+   ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 (0xC02B),
    TLS_RSA_WITH_AES_128_GCM_SHA256 (0x009C).
    ECDHE is P-256 only (net/ec256.c); certificates may be RSA
    or ECDSA P-256. X.509 chain verification with the same
@@ -333,12 +333,22 @@ static int der_tlv(const u8 *buf, u32 buflen, u32 pos, u8 *tag,
     else {
         u32 n = lb & 0x7F;
         if (n == 0 || n > 4) return -1;
-        if (pos + 2 + n > buflen) return -1;
+        /* Wrap-proof: pos + 1 < buflen was checked above, so
+           buflen - pos - 2 cannot underflow. */
+        if (n > buflen - pos - 2) return -1;
         vl = 0;
         for (u32 i = 0; i < n; i++) vl = (vl << 8) | buf[pos + 2 + i];
         hl = 2 + n;
     }
-    if (pos + hl + vl > buflen) return -1;
+    /* Wrap-proof bounds. The old `pos + hl + vl > buflen` check
+       overflowed u32 when vl was near 2^32, so a crafted length
+       like 0xFFFFFFF0 passed and handed callers a ~4 GiB length
+       (verify_chain memcmp / parse_name_cn walk -> out-of-bounds
+       read -> panic from a malicious server certificate). The
+       subtraction form cannot wrap: pos < buflen (checked above)
+       and hl <= 6, so each subtrahend is in range. */
+    if (hl > buflen - pos) return -1;
+    if (vl > buflen - pos - hl) return -1;
     *tag = t; *hdr_len = hl; *val_len = vl; *val_pos = pos + hl;
     return 0;
 }
@@ -445,7 +455,7 @@ static int parse_cert(const u8 *buf, u32 len, struct cert_info *ci) {
     u8 tag; u32 hl, vl, vp;
     if (der_tlv(buf, len, 0, &tag, &hl, &vl, &vp) != 0 || tag != 0x30) return -1;
     if (hl + vl != len) return -1;
-    u32 pos = vp, end = vp + vl;
+    u32 pos = vp;
     /* tbsCertificate */
     if (der_tlv(buf, len, pos, &tag, &hl, &vl, &vp) != 0 || tag != 0x30) return -1;
     ci->tbs = buf + pos; ci->tbs_len = hl + vl;
@@ -1577,6 +1587,12 @@ static u32 tls13_send_ap_seq = 0, tls13_recv_ap_seq = 0;
 static int tls13_server_epoch_ap = 0; /* 0 = hs keys, 1 = ap keys */
 static int tls13_client_epoch_ap = 0;
 static int tls13_got_encrypted = 0; /* server CCS only before this */
+/* Last completed TLS 1.3 handshake milestone, for failure
+   diagnosis (printed on handshake failure): 1 = keys derived,
+   2 = EncryptedExtensions done, 3 = Certificate done,
+   4 = CertificateVerify done, 5 = server Finished done,
+   6 = client Finished sent. */
+static int tls13_fail_stage = 0;
 static int tls_negotiated_version = 0; /* 0 none, 1 = TLS 1.2, 2 = TLS 1.3 */
 static u8 tls_ecdh_priv[32];
 static u8 tls_ecdh_pub_x[32], tls_ecdh_pub_y[32];
@@ -1635,16 +1651,22 @@ static void hkdf_expand(const u8 *prk, const u8 *info, u32 info_len,
     }
 }
 /* HKDF-Expand-Label (RFC 8446 7.3): HkdfLabel = len(2) ||
-   "tls13 " || label || context_len(1) || context. */
+   label_len(1) || "tls13 " || label || context_len(1) || context.
+   The label field is opaque<7..255>, so its 1-byte length prefix
+   (6 + label length) is REQUIRED; omitting it derives wrong keys
+   that no peer can decrypt (found 2026-10-28: every 1.3 record
+   failed AEAD because both this code and the offline analysis
+   script omitted the byte). */
 static void hkdf_expand_label(const u8 *secret, const char *label,
                               const u8 *ctx, u32 ctx_len,
                               u8 *out, u32 out_len) {
     u8 info[96];
     u32 llen = 0;
     while (label[llen]) llen++;
-    if (2 + 6 + llen + 1 + ctx_len > sizeof(info)) return;
+    if (2 + 1 + 6 + llen + 1 + ctx_len > sizeof(info)) return;
     u32 pos = 0;
     tput16(info, (u16)out_len); pos += 2;
+    info[pos++] = (u8)(6 + llen);
     memcpy(info + pos, "tls13 ", 6); pos += 6;
     memcpy(info + pos, label, llen); pos += llen;
     info[pos++] = (u8)ctx_len;
@@ -1711,7 +1733,9 @@ static int tls13_recv_record(u8 *inner_type, u32 *plain_len) {
            so the overlap is safe. */
         if (gcm_decrypt(key, nonce, hdr, 5,
                         tls13_plain, len - 16,
-                        tls13_plain + len - 16, tls13_plain) != 0) return -1;
+                        tls13_plain + len - 16, tls13_plain) != 0) {
+            return -1;
+        }
         (*seqp)++;
         tls13_got_encrypted = 1;
         u32 n = len - 16;
@@ -1851,10 +1875,10 @@ static int tls13_recv_app(u8 *buf, u32 max) {
 
 /* ---------- Handshake ---------- */
 /* Build and send the combined TLS 1.3 + 1.2 ClientHello.
-   Suites offered: 0x1301, 0xC02F, 0xC00A, 0x009C.
+   Suites offered: 0x1301, 0xC02F, 0xC02B, 0x009C.
    Extensions: SNI, supported_versions [1.3, 1.2],
    supported_groups [secp256r1], signature_algorithms
-   [RSA+SHA256, ECDSA+SHA256], key_share [secp256r1],
+   [RSA+SHA256, ECDSA+SHA256, RSA-PSS+SHA256], key_share [secp256r1],
    ec_point_formats [uncompressed], ALPN [http/1.1].
    The ECDHE keypair is generated here (CSPRNG) and kept in
    tls_ecdh_* for the negotiated path (the 1.3 key_share, or
@@ -1885,7 +1909,7 @@ static int tls_send_combined_hello(const char *host) {
     tput16(hello + pos, 8); pos += 2; /* cipher suites length */
     tput16(hello + pos, 0x1301); pos += 2; /* TLS 1.3 AES-128-GCM */
     tput16(hello + pos, 0xC02F); pos += 2; /* ECDHE-RSA AES-128-GCM */
-    tput16(hello + pos, 0xC00A); pos += 2; /* ECDHE-ECDSA AES-128-GCM */
+    tput16(hello + pos, 0xC02B); pos += 2; /* ECDHE-ECDSA AES-128-GCM */
     tput16(hello + pos, 0x009C); pos += 2; /* RSA AES-128-GCM */
     hello[pos++] = 1; /* compression methods length */
     hello[pos++] = 0; /* null compression */
@@ -1915,12 +1939,18 @@ static int tls_send_combined_hello(const char *host) {
     tput16(hello + pos, 4); pos += 2;
     tput16(hello + pos, 2); pos += 2;
     tput16(hello + pos, 23); pos += 2;
-    /* signature_algorithms [RSA+SHA256, ECDSA+SHA256]. */
+    /* signature_algorithms [RSA+SHA256, ECDSA+SHA256,
+       RSA-PSS+SHA256]. PSS is LAST on purpose: TLS 1.2
+       servers keep picking PKCS#1 (the long-verified path)
+       while TLS 1.3 servers that require PSS for
+       CertificateVerify (OpenSSL does: it refuses PKCS#1
+       for 1.3 CV) pick 0x0804. */
     tput16(hello + pos, 13); pos += 2;
+    tput16(hello + pos, 8); pos += 2;
     tput16(hello + pos, 6); pos += 2;
-    tput16(hello + pos, 4); pos += 2;
     hello[pos++] = 0x04; hello[pos++] = 0x01;
     hello[pos++] = 0x04; hello[pos++] = 0x03;
+    hello[pos++] = 0x08; hello[pos++] = 0x04;
     /* key_share [secp256r1 + pubkey]. */
     tput16(hello + pos, 51); pos += 2;
     tput16(hello + pos, 71); pos += 2; /* 2 + 2 + 2 + 65 */
@@ -2023,7 +2053,7 @@ static int tls_read_server_hello(int *is13) {
     }
     if (sv_version != 0) return -1; /* unknown version */
     if (tls_cipher_suite != 0x009C && tls_cipher_suite != 0xC02F &&
-        tls_cipher_suite != 0xC00A) return -1;
+        tls_cipher_suite != 0xC02B) return -1;
     /* Downgrade sentinel: a server that negotiated below 1.3
        while we offered 1.3 must not carry DOWNGRD. */
     if (memcmp(tls_server_random + 24, "DOWNGRD", 7) == 0 &&
@@ -2080,10 +2110,11 @@ static int tls12_handshake_rest(const char *host) {
     /* ECDHE only: ServerKeyExchange, signed over
        client_random || server_random || params. Signature
        algorithm dispatch: 0x0401 = SHA256+RSA (RSA leaf
-       only), 0x0403 = SHA256+ECDSA (EC leaf only). A bad
+       only), 0x0804 = SHA256+RSA-PSS (RSA leaf only),
+       0x0403 = SHA256+ECDSA (EC leaf only). A bad
        curve, point, hash algorithm, or signature fails
        closed (-2, never a fallback to RSA key exchange). */
-    if (tls_cipher_suite == 0xC02F || tls_cipher_suite == 0xC00A) {
+    if (tls_cipher_suite == 0xC02F || tls_cipher_suite == 0xC02B) {
         mtype = tls_next_hs(msg, 8192, &msg_len);
         if (mtype != 12) return -1;
         const u8 *sk = msg + 4;
@@ -2114,6 +2145,17 @@ static int tls12_handshake_rest(const char *host) {
             if (bn_to_be(&tls_leaf_mod, mod_be, k2) != 0) return -2;
             if (rsa_verify_sha256(mod_be, k2, tls_leaf_exp,
                                   sig, sig_len, ske_msg, sizeof(ske_msg)) != 0) return -2;
+        } else if (ske_alg == 0x0804) {
+            if (tls_leaf_key_type != 0) return -2;
+            int bl2 = bn_bitlen(&tls_leaf_mod);
+            u32 k2 = (u32)((bl2 + 7) / 8);
+            u8 mod_be[256];
+            if (k2 < 62 || k2 > 256) return -2;
+            if (bn_to_be(&tls_leaf_mod, mod_be, k2) != 0) return -2;
+            u8 h[32];
+            sha256_compute(ske_msg, sizeof(ske_msg), h);
+            if (rsa_verify_pss_sha256(mod_be, k2, tls_leaf_exp,
+                                      sig, sig_len, h) != 0) return -2;
         } else if (ske_alg == 0x0403) {
             if (tls_leaf_key_type != 1) return -2;
             u8 r[32], s[32], h[32];
@@ -2137,7 +2179,7 @@ static int tls12_handshake_rest(const char *host) {
        RSA: the classic 48-byte versioned premaster. */
     u8 premaster[48];
     u32 premaster_len = 48;
-    if (tls_cipher_suite == 0xC02F || tls_cipher_suite == 0xC00A) {
+    if (tls_cipher_suite == 0xC02F || tls_cipher_suite == 0xC02B) {
         u8 shared[32];
         if (p256_ecdh(tls_ecdh_priv, tls_peer_x, tls_peer_y, shared) != 0) return -1;
         memset(tls_ecdh_priv, 0, 32);
@@ -2256,6 +2298,7 @@ static int tls13_handshake_rest(const char *host) {
     tls13_send_hs_seq = 0;
     tls13_recv_hs_seq = 0;
     /* Encrypted handshake messages. */
+    tls13_fail_stage = 1;
     int mtype = tls13_next_hs(tls13_hs_buf, 16384, &tls13_hs_len);
     if (mtype != 8) return -1; /* EncryptedExtensions */
     {
@@ -2265,11 +2308,20 @@ static int tls13_handshake_rest(const char *host) {
         if (tget16(ee) != ee_len - 2) return -1;
     }
     if (tls13_transcript_append(tls13_hs_buf, tls13_hs_len) != 0) return -1;
+    tls13_fail_stage = 2;
+    /* CertificateRequest may appear between EncryptedExtensions and
+       Certificate when the server asks for client auth. We never
+       authenticate, but it IS part of the transcript, so skip any
+       number of them (appending each) before expecting Certificate. */
+    mtype = tls13_next_hs(tls13_hs_buf, 16384, &tls13_hs_len);
+    while (mtype == 13) {
+        if (tls13_transcript_append(tls13_hs_buf, tls13_hs_len) != 0) return -1;
+        mtype = tls13_next_hs(tls13_hs_buf, 16384, &tls13_hs_len);
+    }
+    if (mtype != 11) return -1;
     /* Certificate: context length must be 0; each cert is
        DER + extensions (skipped). The leaf DER is kept for
        the TOFU print. */
-    mtype = tls13_next_hs(tls13_hs_buf, 16384, &tls13_hs_len);
-    if (mtype != 11) return -1;
     {
         const u8 *cm = tls13_hs_buf + 4;
         u32 cm_len = tls13_hs_len - 4;
@@ -2310,10 +2362,13 @@ static int tls13_handshake_rest(const char *host) {
         }
     }
     if (tls13_transcript_append(tls13_hs_buf, tls13_hs_len) != 0) return -1;
+    tls13_fail_stage = 3;
     /* CertificateVerify. The signed blob is 64 spaces +
        "TLS 1.3, server CertificateVerify" + 0x00 + transcript
        hash. Signature algorithm must match the leaf key
-       type; anything else (incl. RSA-PSS) fails closed. */
+       type: 0x0401 PKCS#1 v1.5 and 0x0804 RSA-PSS for RSA
+       leaves, 0x0403 ECDSA for EC leaves; anything else
+       fails closed. */
     mtype = tls13_next_hs(tls13_hs_buf, 16384, &tls13_hs_len);
     if (mtype != 15) return -1;
     {
@@ -2322,7 +2377,7 @@ static int tls13_handshake_rest(const char *host) {
         if (cv_len < 4) return -2;
         u16 alg = tget16(cv);
         u16 sig_len = tget16(cv + 2);
-        if (4 + sig_len != cv_len) return -2;
+        if (4u + sig_len != cv_len) return -2;
         const u8 *sig = cv + 4;
         u8 th[32];
         tls13_transcript_hash(th);
@@ -2342,6 +2397,18 @@ static int tls13_handshake_rest(const char *host) {
                130-byte blob directly. */
             if (rsa_verify_sha256(mod_be, k, tls_leaf_exp,
                                   sig, sig_len, blob, sizeof(blob)) != 0) return -2;
+        } else if (alg == 0x0804) {
+            if (tls_leaf_key_type != 0) return -2;
+            int bl = bn_bitlen(&tls_leaf_mod);
+            u32 k = (u32)((bl + 7) / 8);
+            u8 mod_be[256];
+            if (k < 62 || k > 256) return -2;
+            if (bn_to_be(&tls_leaf_mod, mod_be, k) != 0) return -2;
+            /* PSS signs the hash of the blob. */
+            u8 h[32];
+            sha256_compute(blob, sizeof(blob), h);
+            if (rsa_verify_pss_sha256(mod_be, k, tls_leaf_exp,
+                                      sig, sig_len, h) != 0) return -2;
         } else if (alg == 0x0403) {
             if (tls_leaf_key_type != 1) return -2;
             u8 r[32], s[32], h[32];
@@ -2353,6 +2420,7 @@ static int tls13_handshake_rest(const char *host) {
         }
     }
     if (tls13_transcript_append(tls13_hs_buf, tls13_hs_len) != 0) return -1;
+    tls13_fail_stage = 4;
     /* Server Finished: verify BEFORE appending it. */
     mtype = tls13_next_hs(tls13_hs_buf, 16384, &tls13_hs_len);
     if (mtype != 20) return -1;
@@ -2366,6 +2434,7 @@ static int tls13_handshake_rest(const char *host) {
         if (memcmp(tls13_hs_buf + 4, expect, 32) != 0) return -1;
     }
     if (tls13_transcript_append(tls13_hs_buf, tls13_hs_len) != 0) return -1;
+    tls13_fail_stage = 5;
     /* Master secret + application traffic secrets. */
     u8 derived2[32], master[32];
     tls13_derive_secret(hs_secret, "derived", TLS13_EMPTY_HASH, derived2);
@@ -2377,17 +2446,23 @@ static int tls13_handshake_rest(const char *host) {
     tls13_derive_secret(master, "s ap traffic", th2, s_ap);
     tls13_key_iv(s_ap, tls13_s_ap_key, tls13_s_ap_iv);
     tls13_key_iv(c_ap, tls13_c_ap_key, tls13_c_ap_iv);
-    tls13_server_epoch_ap = 1;
-    tls13_client_epoch_ap = 1;
-    tls13_send_ap_seq = 0;
-    tls13_recv_ap_seq = 0;
-    /* Client Finished over Hash(CH..server Finished). */
+    /* Client Finished over Hash(CH..server Finished). It is
+       sent under the CLIENT HANDSHAKE keys: the epoch switch
+       to application keys happens only AFTER it is sent.
+       (An earlier draft switched epochs first, which
+       encrypted Finished under the ap keys; the server then
+       failed to decrypt it and the handshake died here.) */
     {
         u8 fin_key[32], verify[32];
         hkdf_expand_label(c_hs, "finished", 0, 0, fin_key, 32);
         hmac_sha256(fin_key, 32, th2, 32, verify);
         if (tls13_send_hs(20, verify, 32) != 0) return -1;
+        tls13_fail_stage = 6;
     }
+    tls13_server_epoch_ap = 1;
+    tls13_client_epoch_ap = 1;
+    tls13_send_ap_seq = 0;
+    tls13_recv_ap_seq = 0;
     return 0;
 }
 /* Dispatcher: reset all state (1.2 + 1.3), send the combined
@@ -2407,6 +2482,7 @@ static int tls_handshake(const char *host) {
     tls13_server_epoch_ap = 0;
     tls13_client_epoch_ap = 0;
     tls13_got_encrypted = 0;
+    tls13_fail_stage = 0;
     tls_negotiated_version = 0;
     tls_sh_ks_present = 0;
     if (tls_send_combined_hello(host) != 0) return -1;
@@ -2416,6 +2492,8 @@ static int tls_handshake(const char *host) {
     if (is13) {
         rc = tls13_handshake_rest(host);
         if (rc == 0) tls_negotiated_version = 2;
+        else console_printf("tls13: handshake failed at stage %d\n",
+                            tls13_fail_stage);
     } else {
         rc = tls12_handshake_rest(host);
         if (rc == 0) tls_negotiated_version = 1;

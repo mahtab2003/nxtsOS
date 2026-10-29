@@ -3,7 +3,12 @@
 #include "../kernel/common.h"
 void keyboard_init(void);
 void keyboard_irq_handler(void);
-int  keyboard_getchar(void); /* -1 if no key waiting */
+/* Returns -1 if no key waiting, 0..255 for an ASCII/control char,
+   or a KEY_* special code for a delivered extended key (currently
+   PgUp/PgDn only; arrows and other extended keys stay ignored). */
+int  keyboard_getchar(void);
+#define KEY_PGUP 0x101
+#define KEY_PGDN 0x102
 void keyboard_inject_char(char c); /* test-only: push an ASCII char into the buffer */
 void keyboard_flush(void); /* discard buffered keys (login/lock/logout) */
 void keyboard_poll(void); /* pick up a pending byte without an IRQ */

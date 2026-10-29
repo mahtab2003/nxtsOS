@@ -20,7 +20,10 @@ static const char shifted[128] = {
 };
 
 #define BUF_SIZE 256
-static volatile char buf[BUF_SIZE];
+/* Int buffer, not char: special keys (KEY_PGUP/KEY_PGDN) travel as
+   values above 255, and a char buffer would truncate them (or sign
+   extend them into -1, the no-key value). */
+static volatile int buf[BUF_SIZE];
 static volatile u32 head = 0, tail = 0;
 static volatile int shift = 0, extended = 0;
 /* v0.7.3 diagnostics: bytes drained from the controller at startup
@@ -123,7 +126,7 @@ u32 keyboard_drain_controller(void) {
     return n;
 }
 
-static void push_char(char c) {
+static void push_char(int c) {
     u32 next = (head + 1) % BUF_SIZE;
     if (next != tail) { buf[head] = c; head = next; }
 }
@@ -140,7 +143,15 @@ static void keyboard_feed(u8 sc) {
     csprng_stir(sample, sizeof(sample));
     last_sc = sc;
     if (sc == 0xE0) { extended = 1; return; }
-    if (extended) { extended = 0; return; } /* arrows etc: ignored */
+    /* Extended keys: only PgUp/PgDn are delivered (as special codes
+       for terminal scrollback); arrows and the rest stay ignored,
+       and release codes (0xC9/0xD1) match neither make code. */
+    if (extended) {
+        extended = 0;
+        if (sc == 0x49) push_char(KEY_PGUP);
+        else if (sc == 0x51) push_char(KEY_PGDN);
+        return;
+    }
     if (sc == 0x2A || sc == 0x36) { shift = 1; return; }
     if (sc == 0xAA || sc == 0xB6) { shift = 0; return; }
     if (sc & 0x80) return; /* key release */
@@ -176,9 +187,9 @@ void keyboard_poll(void) {
 
 int keyboard_getchar(void) {
     if (head == tail) return -1;
-    char c = buf[tail];
+    int c = buf[tail];
     tail = (tail + 1) % BUF_SIZE;
-    return (int)c;
+    return c;
 }
 
 /* Discard any buffered keys. Used on login, lock, and logout, so a

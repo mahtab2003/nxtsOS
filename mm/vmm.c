@@ -90,7 +90,18 @@ u32 vmm_create_pd(void) {
        immediately after the framebuffer inside this same 4 MB
        entry, so it is shared by the same copy. User code itself
        (ring 3) still cannot access these supervisor pages
-       directly. */
+       directly.
+       NOTE: the e1000 MMIO region (PD entry 260, 0x41000000) is
+       deliberately NOT shared here. No syscall touches MMIO, so
+       syscall-context kernel code never needs it; and kernel/
+       scheduler code outside syscalls always runs with the kernel
+       PD, because run_process() restores it on return from a user
+       switch (see proc.c — a missing restore there once made the
+       first network send after a background-job tick page-fault
+       on the MMIO read). If a future syscall ever needs MMIO,
+       share entry 260 here AND teach vmm_destroy_pd to skip it
+       (it currently frees every entry except 256 — freeing a
+       shared table would corrupt the kernel PD). */
     npd[256] = kpd[256];
     return pd;
 }

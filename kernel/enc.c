@@ -52,6 +52,7 @@ static int read_line_noecho(char *buf, u32 max) {
         if (c < 0) { __asm__ volatile ("hlt"); continue; }
         if (c == '\n') { console_putchar('\n'); buf[len] = 0; return (int)len; }
         if (c == '\b') { if (len > 0) len--; }
+        else if (c >= 0x100) { /* special key (PgUp/PgDn): ignored, never stored */ }
         else if (len < max - 1) buf[len++] = (char)c;
     }
 }

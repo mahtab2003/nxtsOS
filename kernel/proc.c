@@ -40,6 +40,19 @@ static void run_process(struct proc *p) {
        so without this the scheduler — and the shell after it — would run
        with interrupts off and never see another timer/keyboard IRQ. */
     current_proc = 0;
+    /* CRITICAL: sched_switch_asm restores the scheduler's registers and
+       stack but NOT CR3, so without this the scheduler keeps running
+       with the just-run process's user page directory. User PDs share
+       only PD entries 0-7 (kernel 0-32 MB) and 256 (framebuffer) —
+       NOT entry 260 (0x41000000, e1000 MMIO). The first network send
+       after a background-job tick therefore page-faulted on the MMIO
+       read in net_send (v1.1.2 Virt-Manager report: EXCEPTION 14,
+       eip in net_send, PAGE FAULT at 0x41003810). Kernel/scheduler
+       code must always run with the kernel PD; user code runs with
+       its own PD only between switch_to_user_asm and the next
+       sched_switch. One CR3 reload per job tick (TLB flush) is the
+       price, and it is negligible here. */
+    vmm_enable_paging(vmm_kernel_pd());
     __asm__ volatile ("sti");
 }
 
@@ -109,13 +122,21 @@ int proc_bg_at(int n, char *name_out, u32 *pid_out, u32 *uid_out) {
     return -1;
 }
 int proc_bg_list(void) {
+    /* List view (Work D): header + footer count around the pinned
+       row format (`pid %u  %s  uid %u`, relied on by tests); the
+       zero-case line is preserved verbatim. Two passes: the header
+       must print before the rows, but the count is known only after
+       the first pass. */
     int n = 0;
+    for (int i = 0; i < MAX_BG; i++)
+        if (bg_jobs[i].used) n++;
+    if (n == 0) { console_write("(no background jobs)\n"); return 0; }
+    console_write("PID  NAME  UID\n");
     for (int i = 0; i < MAX_BG; i++) {
         if (!bg_jobs[i].used) continue;
         console_printf("pid %u  %s  uid %u\n", bg_jobs[i].p.pid, bg_jobs[i].name, bg_jobs[i].p.uid);
-        n++;
     }
-    if (n == 0) console_write("(no background jobs)\n");
+    console_printf("(%u background job(s))\n", n);
     return n;
 }
 int proc_bg_kill(u32 pid, u32 uid) {

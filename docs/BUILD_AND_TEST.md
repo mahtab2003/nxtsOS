@@ -40,7 +40,7 @@ checks `logs/serial.log` for the exact markers:
 - `GDT installed`
 - `Interrupts enabled`
 - `nxts> ` (shell prompt)
-- `Commands: help, mem, ticks, clear, reboot`
+- `Command groups: system, session, fs, proc, pkg, net, crypto, diag, gui, test`
 - `Memory: total`
 
 CORRECTION: this section used to say the test boots with

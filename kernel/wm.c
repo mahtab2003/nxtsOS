@@ -23,7 +23,8 @@
 
 enum win_type { W_WELCOME, W_SYSTEM, W_MOUSE, W_BUTTONS, W_USER,
     W_SETTINGS, W_FILES, W_ABOUT, W_DESKTOP_ICONS,
-    W_NETWORK, W_WEB, W_EDITOR, W_MONITOR, W_VIEWER, W_PACKAGES, W_REPO, W_CLOCK };
+    W_NETWORK, W_WEB, W_EDITOR, W_MONITOR, W_VIEWER, W_PACKAGES, W_REPO, W_CLOCK,
+    W_CALENDAR, W_STOPWATCH, W_NOTES };
 
 /* GUI event queue for user windows (Phase 8). Event types:
    1=expose (redraw), 2=mouse down, 3=mouse up, 4=key, 5=close.
@@ -80,6 +81,10 @@ static u32 desk_taskbar_text_col(void);
    (forward-declared here because cursor_move_only's fallback
    must redraw the active UI, not always the classic one). */
 static void desk_redraw(void);
+/* Forward-declared: the taskbar restore paths (classic + desktop)
+   queue EXPOSE for restored user windows, before the definition
+   below (same reason as desk_redraw: use before definition). */
+static void gui_queue_event(struct window *wn, int type, s32 x, s32 y, int key, int button);
 /* Desktop-active flag, defined with the desktop section below
    (tentative definition; the initialised definition follows). */
 static int desk_active;
@@ -547,7 +552,13 @@ static int wm_run_internal(int autotest) {
                     for (int zi = 0; zi < zcount; zi++) {
                         struct window *wn = &wins[zorder[zi]];
                         if (mx >= bx && mx < bx + 118) {
-                            if (wn->minimized) wn->minimized = 0;
+                            if (wn->minimized) {
+                                wn->minimized = 0;
+                                /* Restoring a user window must re-expose
+                                   it: the redraw below erases its client
+                                   area (see the EXPOSE-on-redraw fix). */
+                                if (wn->type == W_USER) gui_queue_event(wn, GUI_EV_EXPOSE, 0, 0, 0, 0);
+                            }
                             bring_to_front(zorder[zi]);
                             break;
                         }
@@ -1782,7 +1793,7 @@ static void desk_draw_about_content(int idx, s32 dx, s32 dy, s32 dw, s32 dh) {
     struct window *wn = &wins[idx];
     s32 x = wn->x, y = wn->y;
     s32 cx = x + 1, cy = y + TITLE_H + 1, cw = wn->w - 2, ch = wn->h - TITLE_H - 2;
-    draw_text2(x + 10, y + 32, "nxtsOS v1.1.2", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    draw_text2(x + 10, y + 32, "nxtsOS v1.1.3", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
     draw_text2(x + 10, y + 52, "Original kernel, Multiboot, 32-bit x86.", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
     draw_text2(x + 10, y + 72, "Not a Linux distribution or fork.", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
     char buf[64];
@@ -2653,6 +2664,344 @@ static int desk_open_repo(void) {
    "(unavailable)", never as an invented date. The time +
    date + uptime are printed once on open, so the serial
    log proves content, not just that a window opened. */
+/* Calendar app (apps run): month grid from the CMOS RTC date.
+   Displayed month/year live in the window's aux1/aux2 (0/0 =
+   RTC unavailable); selected day in selected (-1 = none). */
+static void desk_draw_text2x(s32 x, s32 y, const char *s, u32 fg,
+                             s32 dx, s32 dy, s32 dw, s32 dh);
+static const char *cal_month_name(int m) {
+    static const char *names[12] = {"January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December"};
+    if (m < 1 || m > 12) return "?";
+    return names[m - 1];
+}
+static int cal_is_leap(int y) { return (y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)); }
+static int cal_dim(int y, int m) {
+    static const int dim[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    if (m < 1 || m > 12) return 30;
+    if (m == 2) return dim[1] + (cal_is_leap(y) ? 1 : 0);
+    return dim[m - 1];
+}
+/* Weekday of the 1st (0=Sunday). Days since 1970-01-01, which was
+   a Thursday (4). All u32: years here are ~2000-2100, so the day
+   count stays far below 2^32 (no u64 division anywhere). */
+static int cal_first_weekday(int y, int m) {
+    u32 days = 0;
+    for (int yy = 1970; yy < y; yy++) days += 365u + (cal_is_leap(yy) ? 1u : 0u);
+    for (int mm = 1; mm < m; mm++) days += (u32)cal_dim(y, mm);
+    return (int)((days + 4u) % 7u);
+}
+static void desk_draw_calendar_content(int idx, s32 dx, s32 dy, s32 dw, s32 dh) {
+    struct window *wn = &wins[idx];
+    s32 x = wn->x, y = wn->y;
+    s32 cx = x + 1, cy = y + TITLE_H + 1, cw = wn->w - 2, ch = wn->h - TITLE_H - 2;
+    if (wn->aux2 == 0) {
+        draw_text2(x + 10, y + 32, "Calendar: date unavailable (RTC did not respond).", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+        return;
+    }
+    char line[64];
+    int p = 0;
+    const char *t = cal_month_name(wn->aux1);
+    while (*t) line[p++] = *t++;
+    line[p++] = ' ';
+    char num[16];
+    u32_to_str((u32)wn->aux2, num, 10);
+    int t2 = 0;
+    while (num[t2]) line[p++] = num[t2++];
+    line[p] = 0;
+    draw_text2(x + 10, y + 32, line, 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    fb_fill_rect_clip(x + 10, y + 56, 80, 24, 0x00E0E0E0u, dx, dy, dw, dh);
+    draw_text2(x + 18, y + 60, "< Prev", 0x00000000u, 0x00E0E0E0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    fb_fill_rect_clip(x + 390, y + 56, 80, 24, 0x00E0E0E0u, dx, dy, dw, dh);
+    draw_text2(x + 398, y + 60, "Next >", 0x00000000u, 0x00E0E0E0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    static const char *wd[7] = {"Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"};
+    for (int c = 0; c < 7; c++)
+        draw_text2(x + 10 + c * 64, y + 96, wd[c], 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    int cd = 0, cm = 0, cy2 = 0;
+    int have_today = rtc_date(&cd, &cm, &cy2);
+    int first = cal_first_weekday(wn->aux2, wn->aux1);
+    int ndays = cal_dim(wn->aux2, wn->aux1);
+    for (int d = 1; d <= ndays; d++) {
+        int cell = first + d - 1;
+        int col = cell % 7, row = cell / 7;
+        s32 cellx = x + 10 + col * 64, celly = y + 120 + row * 24;
+        int is_today = (have_today && wn->aux1 == cm && wn->aux2 == cy2 && d == cd);
+        int is_sel = (wn->selected == d);
+        if (is_today) fb_fill_rect_clip(cellx - 2, celly - 2, 36, 20, 0x002060A0u, dx, dy, dw, dh);
+        else if (is_sel) fb_fill_rect_clip(cellx - 2, celly - 2, 36, 20, 0x00A0A0A0u, dx, dy, dw, dh);
+        u32_to_str((u32)d, num, 10);
+        draw_text2(cellx, celly, num, is_today ? 0x00FFFFFFu : 0x00000000u,
+                   is_today ? 0x002060A0u : (is_sel ? 0x00A0A0A0u : 0x00D0D0D0u),
+                   cx, cy, cw, ch, dx, dy, dw, dh);
+    }
+    if (wn->selected > 0) {
+        p = 0;
+        const char *s = "Selected: ";
+        while (*s) line[p++] = *s++;
+        u32_to_str((u32)wn->selected, num, 10);
+        t2 = 0;
+        while (num[t2]) line[p++] = num[t2++];
+        line[p++] = '/';
+        u32_to_str((u32)wn->aux1, num, 10);
+        t2 = 0;
+        while (num[t2]) line[p++] = num[t2++];
+        line[p++] = '/';
+        u32_to_str((u32)wn->aux2, num, 10);
+        t2 = 0;
+        while (num[t2]) line[p++] = num[t2++];
+        line[p] = 0;
+        draw_text2(x + 10, y + 280, line, 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    } else {
+        draw_text2(x + 10, y + 280, "Selected: (none - click a day)", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    }
+    if (have_today) {
+        char dat[16];
+        date_text(dat);
+        p = 0;
+        const char *s = "Today: ";
+        while (*s) line[p++] = *s++;
+        t2 = 0;
+        while (dat[t2]) line[p++] = dat[t2++];
+        line[p] = 0;
+        draw_text2(x + 10, y + 304, line, 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    }
+    draw_text2(x + 10, y + 328, "Click a day to select it. Prev/Next change month.", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+}
+static int desk_open_calendar(void) {
+    for (int i = 0; i < MAX_WINDOWS; i++)
+        if (wins[i].used && wins[i].type == W_CALENDAR) { bring_to_front(i); return i; }
+    int id = wm_create("Calendar", 160, 80, 480, 360, W_CALENDAR);
+    if (id < 0) return -1;
+    int idx = find_by_id(id);
+    if (idx >= 0) {
+        int d = 0, m = 0, y = 0;
+        if (rtc_date(&d, &m, &y)) { wins[idx].aux1 = m; wins[idx].aux2 = y; }
+        else { wins[idx].aux1 = 0; wins[idx].aux2 = 0; }
+        wins[idx].selected = -1;
+        console_write("Desktop: Calendar opened\n");
+        console_printf("calendar: shown %d %d\n", wins[idx].aux1, wins[idx].aux2);
+    }
+    return idx;
+}
+/* Stopwatch app (apps run): single instance, so state lives in
+   file-scope globals (Editor-buffer precedent). Ticks are 100 Hz. */
+static int sw_running = 0;
+static u32 sw_accum = 0;
+static u32 sw_start = 0;
+static u32 sw_laps[8];
+static int sw_nlaps = 0;
+static u32 sw_elapsed(void) {
+    if (sw_running) return sw_accum + (timer_ticks - sw_start);
+    return sw_accum;
+}
+/* MM:SS.t, minutes zero-padded below 10, unpadded above 99-proof:
+   u32_to_str handles any minute count, so the display never
+   breaks past 99 minutes (it just grows wider). */
+static void sw_format(u32 ticks, char *out) {
+    u32 total = ticks / 100, mm = total / 60, ss = total % 60, t = (ticks % 100) / 10;
+    int p = 0;
+    char num[16];
+    if (mm < 10) out[p++] = '0';
+    u32_to_str(mm, num, 10);
+    int i = 0;
+    while (num[i]) out[p++] = num[i++];
+    out[p++] = ':';
+    out[p++] = (char)('0' + ss / 10);
+    out[p++] = (char)('0' + ss % 10);
+    out[p++] = '.';
+    out[p++] = (char)('0' + t);
+    out[p] = 0;
+}
+static void desk_draw_stopwatch_content(int idx, s32 dx, s32 dy, s32 dw, s32 dh) {
+    struct window *wn = &wins[idx];
+    s32 x = wn->x, y = wn->y;
+    s32 cx = x + 1, cy = y + TITLE_H + 1, cw = wn->w - 2, ch = wn->h - TITLE_H - 2;
+    char tbuf[24];
+    sw_format(sw_elapsed(), tbuf);
+    draw_text2(x + 10, y + 32, "Stopwatch (10 ticks per second)", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    desk_draw_text2x(x + 10, y + 56, tbuf, 0x00000000u, dx, dy, dw, dh);
+    fb_fill_rect_clip(x + 10, y + 120, 100, 24, 0x00E0E0E0u, dx, dy, dw, dh);
+    draw_text2(x + 18, y + 124, sw_running ? "Stop" : "Start", 0x00000000u, 0x00E0E0E0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    fb_fill_rect_clip(x + 120, y + 120, 100, 24, 0x00E0E0E0u, dx, dy, dw, dh);
+    draw_text2(x + 128, y + 124, "Reset", 0x00000000u, 0x00E0E0E0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    fb_fill_rect_clip(x + 230, y + 120, 100, 24, 0x00E0E0E0u, dx, dy, dw, dh);
+    draw_text2(x + 238, y + 124, "Lap", 0x00000000u, 0x00E0E0E0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    draw_text2(x + 10, y + 160, sw_running ? "Status: running" : "Status: stopped", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    draw_text2(x + 10, y + 184, "Laps:", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    for (int i = 0; i < sw_nlaps; i++) {
+        char line[48];
+        int p = 0;
+        const char *s = "Lap ";
+        while (*s) line[p++] = *s++;
+        char num[16];
+        u32_to_str((u32)(i + 1), num, 10);
+        int t = 0;
+        while (num[t]) line[p++] = num[t++];
+        line[p++] = ':';
+        line[p++] = ' ';
+        sw_format(sw_laps[i], tbuf);
+        t = 0;
+        while (tbuf[t]) line[p++] = tbuf[t++];
+        line[p] = 0;
+        draw_text2(x + 10, y + 208 + i * 20, line, 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    }
+    if (sw_nlaps == 0)
+        draw_text2(x + 10, y + 208, "(no laps yet - Start, then Lap)", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+}
+static int desk_open_stopwatch(void) {
+    for (int i = 0; i < MAX_WINDOWS; i++)
+        if (wins[i].used && wins[i].type == W_STOPWATCH) { bring_to_front(i); return i; }
+    int id = wm_create("Stopwatch", 160, 80, 480, 400, W_STOPWATCH);
+    if (id < 0) return -1;
+    console_write("Desktop: Stopwatch opened\n");
+    console_write("stopwatch: opened\n");
+    return find_by_id(id);
+}
+/* Notes app (apps run): one note per line in notes.txt. List
+   state is reloaded from disk on open/add/delete, so the window
+   never shows a stale list after an outside-window save (Files
+   refresh precedent). */
+#define NOTES_MAX 32
+#define NOTES_LINE 64
+static char notes_lines[NOTES_MAX][NOTES_LINE];
+static int notes_count = 0;
+static int notes_have_fs = 0;
+static char notes_msg[64];
+static u8 notes_buf[4096];
+static void notes_set_msg(const char *t) {
+    int i = 0;
+    while (t[i] && i < 63) { notes_msg[i] = t[i]; i++; }
+    notes_msg[i] = 0;
+}
+static void desk_notes_load(void) {
+    notes_count = 0; notes_have_fs = 0; notes_msg[0] = 0;
+    if (!fs_mounted()) return;
+    u32 size = 0;
+    if (fs_read_as("notes.txt", notes_buf, sizeof(notes_buf) - 1, &size, shell_session_uid()) != 0) {
+        /* No file yet: empty list, not an error. */
+        notes_have_fs = 1;
+        return;
+    }
+    notes_have_fs = 1;
+    notes_buf[size] = 0;
+    u32 pos = 0;
+    while (pos < size && notes_count < NOTES_MAX) {
+        u32 ls = pos;
+        while (pos < size && notes_buf[pos] != '\n') pos++;
+        u32 ll = pos - ls;
+        if (pos < size) pos++;
+        if (ll == 0) continue;
+        if (ll >= NOTES_LINE) ll = NOTES_LINE - 1;
+        for (u32 i = 0; i < ll; i++) notes_lines[notes_count][i] = (char)notes_buf[ls + i];
+        notes_lines[notes_count][ll] = 0;
+        notes_count++;
+    }
+}
+static int desk_notes_save(void) {
+    u32 o = 0;
+    for (int i = 0; i < notes_count; i++) {
+        const char *p = notes_lines[i];
+        while (*p && o < sizeof(notes_buf) - 2) notes_buf[o++] = (u8)*p++;
+        if (o < sizeof(notes_buf) - 1) notes_buf[o++] = (u8)'\n';
+    }
+    if (fs_write_as("notes.txt", notes_buf, o, shell_session_uid(), 0644) != 0) return -1;
+    return 0;
+}
+static void desk_notes_add(struct window *wn) {
+    if (!notes_have_fs) { notes_set_msg("No filesystem"); console_write("notes: no filesystem\n"); return; }
+    if (wn->field_len == 0) { notes_set_msg("No note text"); console_write("notes: empty note refused\n"); return; }
+    if (notes_count >= NOTES_MAX) { notes_set_msg("Notes full (32)"); console_write("notes: list full\n"); return; }
+    int n = 0;
+    while (n < wn->field_len && n < NOTES_LINE - 1) { notes_lines[notes_count][n] = wn->field[n]; n++; }
+    notes_lines[notes_count][n] = 0;
+    notes_count++;
+    if (desk_notes_save() != 0) { notes_count--; notes_set_msg("Save failed"); console_write("notes: save failed\n"); return; }
+    wn->field_len = 0; wn->field[0] = 0;
+    notes_set_msg("Note added");
+    console_write("notes: added\n");
+}
+static void desk_notes_delete(struct window *wn) {
+    if (!notes_have_fs) { notes_set_msg("No filesystem"); console_write("notes: no filesystem\n"); return; }
+    if (wn->selected < 0 || wn->selected >= notes_count) { notes_set_msg("Select a note first"); console_write("notes: delete needs selection\n"); return; }
+    int del = wn->selected;
+    for (int i = del; i + 1 < notes_count; i++) {
+        int j = 0;
+        while (notes_lines[i + 1][j]) { notes_lines[i][j] = notes_lines[i + 1][j]; j++; }
+        notes_lines[i][j] = 0;
+    }
+    notes_count--;
+    if (desk_notes_save() != 0) { desk_notes_load(); notes_set_msg("Save failed"); console_write("notes: save failed\n"); return; }
+    wn->selected = -1;
+    notes_set_msg("Note deleted");
+    console_write("notes: deleted\n");
+}
+static void desk_draw_notes_content(int idx, s32 dx, s32 dy, s32 dw, s32 dh) {
+    struct window *wn = &wins[idx];
+    s32 x = wn->x, y = wn->y, w = wn->w;
+    s32 cx = x + 1, cy = y + TITLE_H + 1, cw = w - 2, ch = wn->h - TITLE_H - 2;
+    draw_text2(x + 10, y + 32, "New note:", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    fb_fill_rect_clip(x + 100, y + 28, w - 200, 24, 0x00FFFFFFu, dx, dy, dw, dh);
+    draw_text2(x + 104, y + 32, wn->field, 0x00000000u, 0x00FFFFFFu, x + 100, y + 28, w - 200, 24, dx, dy, dw, dh);
+    if (wn->field_focused) fb_fill_rect_clip(x + 104 + wn->field_len * 8, y + 32, 2, 16, 0x00000000u, dx, dy, dw, dh);
+    fb_fill_rect_clip(x + w - 90, y + 28, 80, 24, 0x00E0E0E0u, dx, dy, dw, dh);
+    draw_text2(x + w - 82, y + 32, "Add", 0x00000000u, 0x00E0E0E0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    if (!notes_have_fs) {
+        draw_text2(x + 10, y + 64, "(no filesystem mounted)", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    } else {
+        char line[80];
+        int p = 0;
+        const char *s = "Notes (";
+        while (*s) line[p++] = *s++;
+        char num[16];
+        u32_to_str((u32)notes_count, num, 10);
+        int t = 0;
+        while (num[t]) line[p++] = num[t++];
+        line[p++] = ')';
+        line[p++] = ':';
+        line[p] = 0;
+        draw_text2(x + 10, y + 64, line, 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+        if (notes_count == 0) {
+            draw_text2(x + 10, y + 88, "(no notes yet - type one above and Add it)", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+        }
+        int shown = 0;
+        for (int r = wn->aux2; r < notes_count && shown < 12; r++, shown++) {
+            s32 ry = y + 88 + shown * 20;
+            if (wn->selected == r) fb_fill_rect_clip(x + 10, ry - 2, w - 20, 20, 0x00A0A0A0u, dx, dy, dw, dh);
+            p = 0;
+            u32_to_str((u32)(r + 1), num, 10);
+            t = 0;
+            while (num[t]) line[p++] = num[t++];
+            line[p++] = '.';
+            line[p++] = ' ';
+            int tc = 0;
+            while (notes_lines[r][tc] && tc < 40) line[p++] = notes_lines[r][tc++];
+            line[p] = 0;
+            draw_text2(x + 10, ry, line, 0x00000000u, wn->selected == r ? 0x00A0A0A0u : 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+        }
+    }
+    draw_text2(x + 10, y + 340, notes_msg, 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    fb_fill_rect_clip(x + 10, y + 372, 48, 20, 0x00E0E0E0u, dx, dy, dw, dh);
+    draw_text2(x + 18, y + 374, "Up", 0x00000000u, 0x00E0E0E0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    fb_fill_rect_clip(x + 68, y + 372, 48, 20, 0x00E0E0E0u, dx, dy, dw, dh);
+    draw_text2(x + 76, y + 374, "Dn", 0x00000000u, 0x00E0E0E0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    fb_fill_rect_clip(x + 150, y + 372, 80, 20, 0x00E0E0E0u, dx, dy, dw, dh);
+    draw_text2(x + 158, y + 374, "Delete", 0x00000000u, 0x00E0E0E0u, cx, cy, cw, ch, dx, dy, dw, dh);
+}
+static int desk_open_notes(void) {
+    for (int i = 0; i < MAX_WINDOWS; i++)
+        if (wins[i].used && wins[i].type == W_NOTES) { bring_to_front(i); return i; }
+    int id = wm_create("Notes", 140, 60, 520, 400, W_NOTES);
+    if (id < 0) return -1;
+    int idx = find_by_id(id);
+    if (idx >= 0) {
+        wins[idx].selected = -1; wins[idx].aux2 = 0;
+        wins[idx].field_len = 0; wins[idx].field[0] = 0; wins[idx].field_focused = 0;
+        desk_notes_load();
+        console_write("Desktop: Notes opened\n");
+        console_printf("notes: loaded %d\n", notes_count);
+    }
+    return idx;
+}
 static void desk_draw_clock_content(int idx, s32 dx, s32 dy, s32 dw, s32 dh) {
     struct window *wn = &wins[idx];
     s32 x = wn->x, y = wn->y;
@@ -2825,7 +3174,27 @@ static void desk_redraw_rect(s32 dx, s32 dy, s32 dw, s32 dh) {
         else if (wn->type == W_PACKAGES) desk_draw_packages_content(zorder[zi], dx, dy, dw, dh);
         else if (wn->type == W_REPO) desk_draw_repo_content(zorder[zi], dx, dy, dw, dh);
         else if (wn->type == W_CLOCK) desk_draw_clock_content(zorder[zi], dx, dy, dw, dh);
+        else if (wn->type == W_CALENDAR) desk_draw_calendar_content(zorder[zi], dx, dy, dw, dh);
+        else if (wn->type == W_STOPWATCH) desk_draw_stopwatch_content(zorder[zi], dx, dy, dw, dh);
+        else if (wn->type == W_NOTES) desk_draw_notes_content(zorder[zi], dx, dy, dw, dh);
         /* W_USER content is app-drawn, never redrawn here. */
+    }
+    /* Bug B (v1.1.2 real-device report): the wallpaper fill above
+       erases any W_USER client area inside the dirty rect, and the
+       frame-only draw_window_clip never repaints it. Queue EXPOSE
+       for every visible user window whose client intersects the
+       dirty rect, so the app repaints on its next tick. Without
+       this, any redraw after the app's paint (focus change, click,
+       taskbar update) left the window blank desktop-blue until the
+       user happened to trigger an app event. wm_gui_rect/text
+       present immediately and never trigger a redraw, so this
+       cannot loop; a full queue drops the event, bounded. */
+    for (int zi = 0; zi < zcount; zi++) {
+        struct window *wn = &wins[zorder[zi]];
+        if (!wn->used || wn->type != W_USER || wn->minimized) continue;
+        if (wn->ws != desk_ws) continue;
+        if (rects_overlap(wn->x + 1, wn->y + TITLE_H + 1, wn->w - 2, wn->h - TITLE_H - 2, dx, dy, dw, dh))
+            gui_queue_event(wn, GUI_EV_EXPOSE, 0, 0, 0, 0);
     }
     /* Panels, on top of windows. */
     s32 sh = scr_h();
@@ -2841,15 +3210,18 @@ static void desk_redraw_rect(s32 dx, s32 dy, s32 dw, s32 dh) {
            below). Column 1's 9 rows need 224 px, so they
            fit inside the 228 px panel, and adding Logout
            moves no earlier row. */
-        s32 mx0 = 0, my0 = sh - TASKBAR_H - 228, mw = 400, mh = 228;
+        s32 mx0 = 0, my0 = sh - TASKBAR_H - 228, mw = 600, mh = 228;
         u32 pcol = desk_panel_col(), ptext = desk_panel_text_col();
         fb_fill_rect_clip(mx0, my0, mw, mh, pcol, dx, dy, dw, dh);
         fb_fill_rect_clip(mx0, my0, mw, 1, 0x00000000u, dx, dy, dw, dh);
         fb_fill_rect_clip(mx0 + 200, my0, 1, mh, 0x00000000u, dx, dy, dw, dh);
+        fb_fill_rect_clip(mx0 + 400, my0, 1, mh, 0x00000000u, dx, dy, dw, dh);
         const char *entries[9] = {"Settings", "Files", "Calculator", "About", "Terminal", "Lock", "Exit desktop", "Reboot", "Logout"};
         for (int i = 0; i < 9; i++) fb_draw_text_clip(mx0 + 10, my0 + 8 + i * 24, entries[i], ptext, pcol, dx, dy, dw, dh);
         const char *entries2[9] = {"Editor", "Monitor", "Network", "Web", "Viewer", "Console", "Packages", "Repo", "Clock"};
         for (int i = 0; i < 9; i++) fb_draw_text_clip(mx0 + 210, my0 + 8 + i * 24, entries2[i], ptext, pcol, dx, dy, dw, dh);
+        const char *entries3[9] = {"Calendar", "Stopwatch", "Notes", "", "", "", "", "", ""};
+        for (int i = 0; i < 9; i++) if (entries3[i][0]) fb_draw_text_clip(mx0 + 410, my0 + 8 + i * 24, entries3[i], ptext, pcol, dx, dy, dw, dh);
     }
     if (desk_quick_open) {
         s32 qx = scr_w() - 260, qy = sh - TASKBAR_H - 140;
@@ -2888,6 +3260,17 @@ static void desk_redraw_rect(s32 dx, s32 dy, s32 dw, s32 dh) {
     present_scene_rect(dx, dy, dw, dh);
 }
 static void desk_redraw(void) { desk_redraw_rect(0, 0, scr_w(), scr_h()); }
+/* Test-only framebuffer sample: stride-4 sum over the scene, for
+   the Bug C differential (console output during desktop must not
+   change any pixel). u32 wrap is fine for a change detector. */
+static u32 desk_fb_sample(void) {
+    u32 sum = 0;
+    if (!fb_ready()) return 0;
+    for (s32 y = 0; y < scr_h(); y += 4)
+        for (s32 x = 0; x < scr_w(); x += 4)
+            sum += fb_read_pixel(x, y);
+    return sum;
+}
 /* User window helpers, called from syscall handler (syscall.c)
    and from the desktop loop. */
 static int desk_active = 0;
@@ -3096,7 +3479,8 @@ int wm_logout_requested(void) {
 
 static void desk_do_action(int action, int *exit_desktop) {
     /* Actions: 0=Settings,1=Files,2=Calculator,3=About,4=Terminal,5=Lock,6=Exit,7=Reboot,8=Logout;
-       column 2 starts at 9 (Editor) through 17 (Clock). */
+       column 2 starts at 9 (Editor) through 17 (Clock);
+       column 3 starts at 18 (Calendar) through 20 (Notes). */
     if (action == 0) desk_open_settings();
     else if (action == 1) desk_open_files();
     else if (action == 2) {
@@ -3178,6 +3562,10 @@ static void desk_do_action(int action, int *exit_desktop) {
     else if (action == 15) desk_open_packages();
     else if (action == 16) desk_open_repo();
     else if (action == 17) desk_open_clock();
+    /* Apps-run launcher column 3. */
+    else if (action == 18) desk_open_calendar();
+    else if (action == 19) desk_open_stopwatch();
+    else if (action == 20) desk_open_notes();
     if (action != 7) desk_reboot_armed = 0;
     if (action != 8) desk_logout_armed = 0;
 }
@@ -3231,6 +3619,15 @@ static int wm_desktop_internal(int autotest) {
     desk_files_sysupd_arm = -1;
     desk_load_settings();
     desk_active = 1;
+    /* Bug C (v1.1.2 real-device report): while the desktop runs,
+       the shell console must not draw onto the framebuffer. Every
+       console_printf during a desktop session (notifications, job
+       output) painted glyphs over the wallpaper, and dirty-rect
+       redraws never repainted outside their rect, so shell text
+       lingered as the "background" behind windows. Suppress the
+       framebuffer path only: serial output and the text buffer
+       keep updating, and exit repaints the shell (below). */
+    console_set_fb_suppressed(1);
     desk_last_activity = timer_ticks;
     desk_notify("Welcome to nxtsOS desktop");
     if (fs_mounted()) desk_notify("Disk mounted");
@@ -3255,7 +3652,7 @@ static int wm_desktop_internal(int autotest) {
                 (autotest == 4 ? 21 : (autotest == 5 ? 243 :
                 (autotest == 6 ? 27 : (autotest == 7 ? 40 :
                 (autotest == 8 ? 3 : (autotest == 9 ? 15 :
-                (autotest == 10 ? 65 : (autotest == 11 ? 13 : (autotest == 12 ? 12 : (autotest == 13 ? 12 : (autotest == 14 ? 24 : (autotest == 15 ? 8 : (autotest == 16 ? 18 : (autotest == 17 ? 16 : (autotest == 18 ? 13 : (autotest == 19 ? 81 : (autotest == 20 ? 40 : (autotest == 21 ? 68 : (autotest == 22 ? 89 : (autotest == 23 ? 10 : (autotest == 24 ? 7 : (autotest == 25 ? 87 : (autotest == 26 ? 34 : (autotest == 27 ? 11 : (autotest == 28 ? 15 : (autotest == 29 ? 15 : (autotest == 30 ? 7 : 11))))))))))))))))))))))))))));
+                (autotest == 10 ? 65 : (autotest == 11 ? 13 : (autotest == 12 ? 12 : (autotest == 13 ? 12 : (autotest == 14 ? 24 : (autotest == 15 ? 8 : (autotest == 16 ? 18 : (autotest == 17 ? 16 : (autotest == 18 ? 13 : (autotest == 19 ? 81 : (autotest == 20 ? 40 : (autotest == 21 ? 68 : (autotest == 22 ? 89 : (autotest == 23 ? 10 : (autotest == 24 ? 7 : (autotest == 25 ? 87 : (autotest == 26 ? 34 : (autotest == 27 ? 11 : (autotest == 28 ? 15 : (autotest == 29 ? 15 : (autotest == 30 ? 7 : (autotest == 31 ? 9 : (autotest == 32 ? 3 : (autotest == 33 ? 79 : 11)))))))))))))))))))))))))))))));
             if (step != auto_step && step <= max_step) {
                 auto_step = step;
                 if (autotest == 4) {
@@ -4519,6 +4916,165 @@ static int wm_desktop_internal(int autotest) {
                     else if (step == 2) mouse_test_set(40, 208, 0);
                     else if (step == 4) mouse_test_set(280, 249, 1);
                     else if (step == 5) mouse_test_set(280, 249, 0);
+                } else if (autotest == 31) {
+                    /* Bug B test (v1.1.2 real-device report): open
+                       Calculator, click '7' (proves paint), force a
+                       full desktop redraw (the blanking event: the
+                       wallpaper fill erases the app client), wait
+                       for the app tick, then probe the display
+                       pixel. Pre-fix the probe reads the desktop
+                       background (no EXPOSE queued); post-fix the
+                       app repaints on EXPOSE and it reads white. */
+                    if (step == 0) mouse_test_set(40, 208, 0);
+                    else if (step == 1) mouse_test_set(40, 208, 1);
+                    else if (step == 2) mouse_test_set(40, 208, 0);
+                    else if (step == 4) mouse_test_set(280, 249, 1);
+                    else if (step == 5) mouse_test_set(280, 249, 0);
+                    else if (step == 6) { desk_redraw(); console_printf("expose: redraw forced\n"); }
+                    else if (step == 9) {
+                        u32 px = fb_read_pixel(250, 190);
+                        console_printf("expose: pixel 0x%x\n", px & 0xFFFFFFu);
+                    }
+                } else if (autotest == 32) {
+                    /* Bug C test (v1.1.2 real-device report): sample
+                       the framebuffer, print console marker lines
+                       (which pre-fix painted glyphs over the
+                       wallpaper), sample again. Post-fix the console
+                       is suppressed during desktop, so both samples
+                       match; pre-fix they differ. The desktop loop
+                       is single-threaded, so nothing else draws
+                       between the two samples in one step. */
+                    if (step == 2) {
+                        u32 before = desk_fb_sample();
+                        console_printf("noconsole: MARKER XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX\n");
+                        console_printf("noconsole: MARKER XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX\n");
+                        console_printf("noconsole: MARKER XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX\n");
+                        u32 after = desk_fb_sample();
+                        console_printf("noconsole: %s before=0x%x after=0x%x\n", before == after ? "SAME" : "DIFF", before, after);
+                    }
+                } else if (autotest == 33) {
+                    /* New-apps test (apps run): launcher column 3
+                       (Calendar, Stopwatch, Notes). Each app opens,
+                       paints (button-fill + client-grey pixel
+                       probes), acts (Prev/Next, Start/Lap/Stop,
+                       type + Enter + select + Delete), and closes;
+                       Calendar opens a second time (repeated-open
+                       proof). Coordinates: launcher my0 = 344,
+                       column 3 x = 500, rows y = 356/380/404;
+                       Start button (32,588); Calendar (160,80)
+                       Prev (210,148) Next (590,148) close
+                       (632,90); Stopwatch (160,80) Start
+                       (220,212) Lap (440,212) close (632,90);
+                       Notes (140,60) field (450,100) row 0
+                       (400,158) Delete (330,442) close (652,70).
+                       Button fill is 0xE0E0E0, client grey is
+                       0xD0D0D0; both are probed, not just assumed
+                       from the open markers. */
+                    if (step == 0) mouse_test_set(32, 588, 0);
+                    else if (step == 1) mouse_test_set(32, 588, 1);
+                    else if (step == 2) mouse_test_set(32, 588, 0);
+                    else if (step == 3) mouse_test_set(500, 356, 0);
+                    else if (step == 4) mouse_test_set(500, 356, 1);
+                    else if (step == 5) mouse_test_set(500, 356, 0);
+                    else if (step == 6) {
+                        u32 b = fb_read_pixel(172, 138), g = fb_read_pixel(400, 352);
+                        console_printf("newapps: calendar px button=0x%x grey=0x%x\n", b & 0xFFFFFFu, g & 0xFFFFFFu);
+                    }
+                    else if (step == 7) mouse_test_set(210, 148, 0);
+                    else if (step == 8) mouse_test_set(210, 148, 1);
+                    else if (step == 9) mouse_test_set(210, 148, 0);
+                    else if (step == 10) mouse_test_set(590, 148, 0);
+                    else if (step == 11) mouse_test_set(590, 148, 1);
+                    else if (step == 12) mouse_test_set(590, 148, 0);
+                    else if (step == 13 || step == 14 || step == 15) {
+                        /* Day-15 cell, computed from the displayed
+                           month (the script runs in-kernel, so it
+                           reads the window state instead of
+                           assuming a calendar layout). Day 15
+                           exists in every month. */
+                        int ci = -1;
+                        for (int i = 0; i < MAX_WINDOWS; i++)
+                            if (wins[i].used && wins[i].type == W_CALENDAR) ci = i;
+                        if (ci >= 0) {
+                            int first = cal_first_weekday(wins[ci].aux2, wins[ci].aux1);
+                            int cell = first + 14, col = cell % 7, row = cell / 7;
+                            int cx = wins[ci].x + 10 + col * 64 + 32, cy = wins[ci].y + 120 + row * 24 + 12;
+                            mouse_test_set(cx, cy, step == 13 ? 0 : (step == 14 ? 1 : 0));
+                        }
+                    }
+                    else if (step == 16) mouse_test_set(632, 90, 0);
+                    else if (step == 17) mouse_test_set(632, 90, 1);
+                    else if (step == 18) mouse_test_set(632, 90, 0);
+                    else if (step == 19) mouse_test_set(32, 588, 0);
+                    else if (step == 20) mouse_test_set(32, 588, 1);
+                    else if (step == 21) mouse_test_set(32, 588, 0);
+                    else if (step == 22) mouse_test_set(500, 380, 0);
+                    else if (step == 23) mouse_test_set(500, 380, 1);
+                    else if (step == 24) mouse_test_set(500, 380, 0);
+                    else if (step == 25) {
+                        u32 b = fb_read_pixel(172, 202);
+                        console_printf("newapps: stopwatch px button=0x%x\n", b & 0xFFFFFFu);
+                    }
+                    else if (step == 26) mouse_test_set(220, 212, 0);
+                    else if (step == 27) mouse_test_set(220, 212, 1);
+                    else if (step == 28) mouse_test_set(220, 212, 0);
+                    else if (step == 29) mouse_test_set(440, 212, 0);
+                    else if (step == 30) mouse_test_set(440, 212, 1);
+                    else if (step == 31) mouse_test_set(440, 212, 0);
+                    else if (step == 32) {
+                        u32 g = fb_read_pixel(400, 460);
+                        console_printf("newapps: stopwatch px grey=0x%x\n", g & 0xFFFFFFu);
+                    }
+                    else if (step == 33) mouse_test_set(220, 212, 0);
+                    else if (step == 34) mouse_test_set(220, 212, 1);
+                    else if (step == 35) mouse_test_set(220, 212, 0);
+                    else if (step == 36) mouse_test_set(632, 90, 0);
+                    else if (step == 37) mouse_test_set(632, 90, 1);
+                    else if (step == 38) mouse_test_set(632, 90, 0);
+                    else if (step == 39) mouse_test_set(32, 588, 0);
+                    else if (step == 40) mouse_test_set(32, 588, 1);
+                    else if (step == 41) mouse_test_set(32, 588, 0);
+                    else if (step == 42) mouse_test_set(500, 404, 0);
+                    else if (step == 43) mouse_test_set(500, 404, 1);
+                    else if (step == 44) mouse_test_set(500, 404, 0);
+                    else if (step == 45) {
+                        u32 b = fb_read_pixel(572, 90);
+                        console_printf("newapps: notes px button=0x%x\n", b & 0xFFFFFFu);
+                    }
+                    else if (step == 46) mouse_test_set(450, 100, 0);
+                    else if (step == 47) mouse_test_set(450, 100, 1);
+                    else if (step == 48) mouse_test_set(450, 100, 0);
+                    else if (step == 49) keyboard_inject_char('h');
+                    else if (step == 50) keyboard_inject_char('e');
+                    else if (step == 51) keyboard_inject_char('l');
+                    else if (step == 52) keyboard_inject_char('l');
+                    else if (step == 53) keyboard_inject_char('o');
+                    else if (step == 54) keyboard_inject_char(' ');
+                    else if (step == 55) keyboard_inject_char('n');
+                    else if (step == 56) keyboard_inject_char('o');
+                    else if (step == 57) keyboard_inject_char('t');
+                    else if (step == 58) keyboard_inject_char('e');
+                    else if (step == 59) keyboard_inject_char('s');
+                    else if (step == 60) keyboard_inject_char('\n');
+                    else if (step == 61) mouse_test_set(400, 158, 0);
+                    else if (step == 62) mouse_test_set(400, 158, 1);
+                    else if (step == 63) mouse_test_set(400, 158, 0);
+                    else if (step == 64) mouse_test_set(330, 442, 0);
+                    else if (step == 65) mouse_test_set(330, 442, 1);
+                    else if (step == 66) mouse_test_set(330, 442, 0);
+                    else if (step == 67) mouse_test_set(652, 70, 0);
+                    else if (step == 68) mouse_test_set(652, 70, 1);
+                    else if (step == 69) mouse_test_set(652, 70, 0);
+                    else if (step == 70) mouse_test_set(32, 588, 0);
+                    else if (step == 71) mouse_test_set(32, 588, 1);
+                    else if (step == 72) mouse_test_set(32, 588, 0);
+                    else if (step == 73) mouse_test_set(500, 356, 0);
+                    else if (step == 74) mouse_test_set(500, 356, 1);
+                    else if (step == 75) mouse_test_set(500, 356, 0);
+                    else if (step == 76) mouse_test_set(632, 90, 0);
+                    else if (step == 77) mouse_test_set(632, 90, 1);
+                    else if (step == 78) mouse_test_set(632, 90, 0);
+                    else if (step == 79) { desk_redraw(); console_write("newapps: done\n"); }
                 } else if (autotest == 2) {
                     /* Security script, 30 ticks per step:
                        0-2: click Settings icon (opens Settings);
@@ -4644,6 +5200,16 @@ static int wm_desktop_internal(int autotest) {
                            that leave the visible rows scroll
                            the view to follow the cursor. */
                         { int old = wn->aux2; desk_editor_follow_cursor(fidx); if (wn->aux2 != old) console_printf("editor: scroll %d\n", wn->aux2); }
+                        if (!pending_redraw) { pend_x = wn->x; pend_y = wn->y; pend_w = wn->w; pend_h = wn->h; pending_redraw = 1; }
+                    } else if (fidx >= 0 && wins[fidx].type == W_NOTES && wins[fidx].field_focused) {
+                        /* Notes new-note field: Enter ADDS the note
+                           (shared action path with the Add button,
+                           so typing a note and pressing Enter is
+                           one complete gesture); other keys edit. */
+                        struct window *wn = &wins[fidx];
+                        if (c == '\b') { if (wn->field_len > 0) wn->field[--wn->field_len] = 0; }
+                        else if (c == '\n') { desk_notes_add(wn); }
+                        else if (c >= 32 && c < 127 && wn->field_len < 63) { wn->field[wn->field_len++] = (char)c; wn->field[wn->field_len] = 0; }
                         if (!pending_redraw) { pend_x = wn->x; pend_y = wn->y; pend_w = wn->w; pend_h = wn->h; pending_redraw = 1; }
                     } else if (fidx >= 0 && wins[fidx].type == W_WEB) {
                         struct window *wn = &wins[fidx];
@@ -4773,6 +5339,13 @@ static int wm_desktop_internal(int autotest) {
                 int hit = -1;
                 for (int i = 0; i < 9; i++) if (inside(mx, my, 0, my0 + i * 24, 200, 24)) hit = i;
                 if (hit < 0) for (int i = 0; i < 9; i++) if (inside(mx, my, 200, my0 + i * 24, 200, 24)) hit = 9 + i;
+                /* Launcher column 3 (apps run): only the
+                   non-empty rows map to actions; empty rows
+                   leave hit at -1 (launcher just closes). */
+                if (hit < 0) {
+                    static const char *entries3[9] = {"Calendar", "Stopwatch", "Notes", "", "", "", "", "", ""};
+                    for (int i = 0; i < 9; i++) if (entries3[i][0] && inside(mx, my, 400, my0 + i * 24, 200, 24)) hit = 18 + i;
+                }
                 desk_launcher_open = 0;
                 if (hit >= 0) { desk_do_action(hit, &exit_desktop); if (!exit_desktop) desk_redraw(); }
                 else desk_redraw();
@@ -4809,7 +5382,13 @@ static int wm_desktop_internal(int autotest) {
                         struct window *wn = &wins[zorder[zi]];
                         if (wn->ws != desk_ws) continue;
                         if (mx >= bx && mx < bx + 118) {
-                            if (wn->minimized) wn->minimized = 0;
+                            if (wn->minimized) {
+                                wn->minimized = 0;
+                                /* Restoring a user window must re-expose
+                                   it: the redraw below erases its client
+                                   area (see the EXPOSE-on-redraw fix). */
+                                if (wn->type == W_USER) gui_queue_event(wn, GUI_EV_EXPOSE, 0, 0, 0, 0);
+                            }
                             bring_to_front(zorder[zi]);
                             desk_redraw();
                             break;
@@ -5928,6 +6507,79 @@ static int wm_desktop_internal(int autotest) {
                                         }
                                     }
                                 }
+                            } else if (wn->type == W_CALENDAR) {
+                                if (wn->aux2 != 0 && inside(mx, my, wn->x + 10, wn->y + 56, 80, 24)) {
+                                    if (wn->aux1 > 1) wn->aux1--;
+                                    else { wn->aux1 = 12; wn->aux2--; }
+                                    wn->selected = -1;
+                                    console_printf("calendar: shown %d %d\n", wn->aux1, wn->aux2);
+                                    desk_redraw();
+                                } else if (wn->aux2 != 0 && inside(mx, my, wn->x + 390, wn->y + 56, 80, 24)) {
+                                    if (wn->aux1 < 12) wn->aux1++;
+                                    else { wn->aux1 = 1; wn->aux2++; }
+                                    wn->selected = -1;
+                                    console_printf("calendar: shown %d %d\n", wn->aux1, wn->aux2);
+                                    desk_redraw();
+                                } else if (wn->aux2 != 0 && mx >= wn->x + 10 && mx < wn->x + 10 + 7 * 64 &&
+                                           my >= wn->y + 120 && my < wn->y + 120 + 6 * 24) {
+                                    int col = (mx - (wn->x + 10)) / 64;
+                                    int row = (my - (wn->y + 120)) / 24;
+                                    int first = cal_first_weekday(wn->aux2, wn->aux1);
+                                    int day = row * 7 + col - first + 1;
+                                    if (day >= 1 && day <= cal_dim(wn->aux2, wn->aux1)) {
+                                        wn->selected = day;
+                                        console_printf("calendar: selected %d/%d/%d\n", day, wn->aux1, wn->aux2);
+                                        desk_redraw();
+                                    }
+                                }
+                            } else if (wn->type == W_STOPWATCH) {
+                                if (inside(mx, my, wn->x + 10, wn->y + 120, 100, 24)) {
+                                    if (sw_running) { sw_accum = sw_elapsed(); sw_running = 0; console_write("stopwatch: stopped\n"); }
+                                    else { sw_start = timer_ticks; sw_running = 1; console_write("stopwatch: started\n"); }
+                                    desk_redraw();
+                                } else if (inside(mx, my, wn->x + 120, wn->y + 120, 100, 24)) {
+                                    sw_running = 0; sw_accum = 0; sw_nlaps = 0;
+                                    console_write("stopwatch: reset\n");
+                                    desk_redraw();
+                                } else if (inside(mx, my, wn->x + 230, wn->y + 120, 100, 24)) {
+                                    if (!sw_running) { desk_notify("Stopwatch: start it first"); console_write("stopwatch: lap needs running\n"); }
+                                    else if (sw_nlaps >= 8) { desk_notify("Stopwatch: lap list full"); console_write("stopwatch: lap list full\n"); }
+                                    else {
+                                        char tbuf[24];
+                                        sw_laps[sw_nlaps] = sw_elapsed(); sw_nlaps++;
+                                        sw_format(sw_laps[sw_nlaps - 1], tbuf);
+                                        console_printf("stopwatch: lap %d %s\n", sw_nlaps, tbuf);
+                                    }
+                                    desk_redraw();
+                                }
+                            } else if (wn->type == W_NOTES) {
+                                if (inside(mx, my, wn->x + 100, wn->y + 28, wn->w - 200, 24)) {
+                                    wn->field_focused = 1;
+                                    desk_redraw();
+                                } else if (inside(mx, my, wn->x + wn->w - 90, wn->y + 28, 80, 24)) {
+                                    desk_notes_add(wn);
+                                    desk_redraw();
+                                } else if (inside(mx, my, wn->x + 10, wn->y + 372, 48, 20)) {
+                                    if (wn->aux2 > 0) wn->aux2--;
+                                    desk_redraw();
+                                } else if (inside(mx, my, wn->x + 68, wn->y + 372, 48, 20)) {
+                                    if (wn->aux2 + 12 < notes_count) wn->aux2++;
+                                    desk_redraw();
+                                } else if (inside(mx, my, wn->x + 150, wn->y + 372, 80, 20)) {
+                                    desk_notes_delete(wn);
+                                    desk_redraw();
+                                } else {
+                                    wn->field_focused = 0;
+                                    if (mx >= wn->x + 10 && mx < wn->x + wn->w - 10 &&
+                                        my >= wn->y + 88 && my < wn->y + 88 + 12 * 20) {
+                                        int r = wn->aux2 + (my - (wn->y + 88)) / 20;
+                                        if (r < notes_count) {
+                                            wn->selected = r;
+                                            console_printf("notes: selected %d\n", r);
+                                            desk_redraw();
+                                        }
+                                    }
+                                }
                             } else if (wn->type == W_USER) {
                                 press_user = wi;
                                 gui_queue_event(wn, GUI_EV_MDOWN, mx - (wn->x + 1), my - (wn->y + TITLE_H + 1), 0, 1);
@@ -6021,6 +6673,19 @@ static int wm_desktop_internal(int autotest) {
                 if (!pending_redraw) { pend_x = wins[clk_idx].x; pend_y = wins[clk_idx].y; pend_w = wins[clk_idx].w; pend_h = wins[clk_idx].h; pending_redraw = 1; }
             }
         }
+        /* 6c: Stopwatch refresh, 10x per second WHILE RUNNING
+           (same single-slot pending_redraw pattern as
+           Monitor/Clock; stopped watches never redraw). */
+        {
+            static u32 last_sw_ticks = 0;
+            int sw_idx = -1;
+            for (int i = 0; i < MAX_WINDOWS; i++)
+                if (wins[i].used && wins[i].type == W_STOPWATCH && !wins[i].minimized && wins[i].ws == desk_ws) sw_idx = i;
+            if (sw_idx >= 0 && sw_running && timer_ticks - last_sw_ticks >= 10) {
+                last_sw_ticks = timer_ticks;
+                if (!pending_redraw) { pend_x = wins[sw_idx].x; pend_y = wins[sw_idx].y; pend_w = wins[sw_idx].w; pend_h = wins[sw_idx].h; pending_redraw = 1; }
+            }
+        }
         /* Desktop idle lock. */
         if (!desk_locked && shell_idle_minutes() != 0 && timer_ticks - desk_last_activity > shell_idle_minutes() * 6000u) {
             desk_show_lock(); desk_redraw();
@@ -6033,6 +6698,7 @@ static int wm_desktop_internal(int autotest) {
         __asm__ volatile ("hlt");
     }
     desk_active = 0;
+    console_set_fb_suppressed(0);
     console_redraw_text();
     return 0;
 }
@@ -6043,6 +6709,31 @@ int wm_desktop_calctest(void) {
        after screendumping. If it returns, the desktop exited. */
     int rc = wm_desktop_internal(3);
     console_printf("desktopcalctest returned (rc=%d)\n", rc);
+    return rc;
+}
+int wm_desktop_exposetest(void) {
+    /* Test-only: runs the Bug B script (mode 31). Not expected to
+       return on its own; the harness ends the run after the probe
+       marker and checks the screendump pixels. */
+    int rc = wm_desktop_internal(31);
+    console_printf("desktopexposetest returned (rc=%d)\n", rc);
+    return rc;
+}
+int wm_desktop_noconsoletest(void) {
+    /* Test-only: runs the Bug C script (mode 32). Same harness
+       pattern: the harness ends the run after the SAME/DIFF
+       marker. */
+    int rc = wm_desktop_internal(32);
+    console_printf("desktopnoconsoletest returned (rc=%d)\n", rc);
+    return rc;
+}
+int wm_desktop_newappstest(void) {
+    /* Test-only: runs the new-apps script (mode 33). Not
+       expected to return on its own; the harness ends the run
+       after the "newapps: done" marker and checks the serial
+       markers + screendump. */
+    int rc = wm_desktop_internal(33);
+    console_printf("desktopnewappstest returned (rc=%d)\n", rc);
     return rc;
 }
 int wm_desktop_sectest(void) {

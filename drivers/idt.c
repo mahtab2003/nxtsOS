@@ -68,9 +68,10 @@ void isr_handler(struct regs *r) {
         console_printf("\nEXCEPTION %u err=0x%x eip=0x%x\n",
                        r->int_no, r->err_code, r->eip);
         if (r->int_no == 14) {
-            u32 cr2;
+            u32 cr2, cr3;
             __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
-            console_printf("PAGE FAULT at 0x%x\n", cr2);
+            __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
+            console_printf("PAGE FAULT at 0x%x CR3 0x%x\n", cr2, cr3);
         }
         panic("unhandled CPU exception");
     }

@@ -1,0 +1,48 @@
+/* Host test for net/rsaverify.c PSS path. Follows the host_ec256.c
+   pattern: compiles the kernel C files on the host with shims.
+   Inputs (modulus, signature, blob-hash) are read from files the
+   capture script writes. Build:
+   gcc -fno-builtin -o /tmp/host_pss tests/host_pss.c net/rsaverify.c net/bignum.c kernel/sha256.c
+   (run from ~/workspace/nxtsOS). Exit 0 on PASS. */
+#include <stdio.h>
+#include <stdlib.h>
+#include "../net/rsaverify.h"
+
+void *memset(void *dst, int val, u32 n) {
+    u8 *d = dst;
+    for (u32 i = 0; i < n; i++) d[i] = (u8)val;
+    return dst;
+}
+void *memcpy(void *dst, const void *src, u32 n) {
+    const u8 *s = src;
+    u8 *d = dst;
+    for (u32 i = 0; i < n; i++) d[i] = s[i];
+    return dst;
+}
+int memcmp(const void *a, const void *b, u32 n) {
+    const u8 *x = a, *y = b;
+    for (u32 i = 0; i < n; i++) if (x[i] != y[i]) return x[i] < y[i] ? -1 : 1;
+    return 0;
+}
+u32 strlen(const char *s) { u32 n = 0; while (s[n]) n++; return n; }
+
+static int read_file(const char *path, u8 *buf, u32 cap) {
+    FILE *f = fopen(path, "rb");
+    if (!f) { printf("cannot open %s\n", path); return -1; }
+    int n = (int)fread(buf, 1, cap, f);
+    fclose(f);
+    return n;
+}
+
+int main(void) {
+    u8 mod[256], sig[256], h[32];
+    int mod_len = read_file("/tmp/pss-mod.bin", mod, 256);
+    int sig_len = read_file("/tmp/pss-sig.bin", sig, 256);
+    int h_len = read_file("/tmp/pss-hash.bin", h, 32);
+    printf("mod_len=%d sig_len=%d h_len=%d\n", mod_len, sig_len, h_len);
+    if (mod_len <= 0 || sig_len <= 0 || h_len != 32) return 2;
+    int rc = rsa_verify_pss_sha256(mod, (u32)mod_len, 65537,
+                                   sig, (u32)sig_len, h);
+    printf("rsa_verify_pss_sha256 -> %d (%s)\n", rc, rc == 0 ? "PASS" : "FAIL");
+    return rc == 0 ? 0 : 1;
+}

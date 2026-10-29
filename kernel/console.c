@@ -10,6 +10,18 @@ static u16 cursor_row = 0, cursor_col = 0;
 static u8 colour = 0x07; /* light grey on black */
 static char text_buf[ROWS][COLS];
 static int fb_mode = 0; /* 0 = VGA text, 1 = framebuffer text */
+static int fb_suppressed = 0; /* desktop active: no fb console draws */
+/* Scrollback (Work D list view): lines that scrolled off the 25-row
+   screen are kept in a 100-line ring (8,000 B, file-scope static —
+   never on the 16 KiB kernel stack). sb_view counts how many lines
+   back from live the screen currently shows; 0 = live. */
+#define SB_LINES 100
+static char sb_lines[SB_LINES][COLS];
+static int sb_head = 0; /* next ring slot to write */
+static int sb_count = 0; /* lines stored, <= SB_LINES */
+static int sb_view = 0; /* lines back from live, 0 = live */
+
+void console_set_fb_suppressed(int v) { fb_suppressed = v ? 1 : 0; }
 
 static void update_cursor(void) {
     if (fb_mode) return; /* framebuffer cursor is drawn by redraw() */
@@ -61,8 +73,10 @@ int console_switch_to_fb(void) {
 
 /* Switch back to the buffered text console after a GUI session.
    If fb_mode was on, redraw the text buffer to the framebuffer;
-   if the system is in VGA mode, this is a no-op redraw. */
+   if the system is in VGA mode, this is a no-op redraw. Always
+   shows live (a history view does not survive a scene switch). */
 void console_redraw_text(void) {
+    sb_view = 0;
     if (fb_mode) render_fb();
     else render_vga();
 }
@@ -71,18 +85,79 @@ void console_clear(void) {
     for (u16 r = 0; r < ROWS; r++)
         for (u16 c = 0; c < COLS; c++) text_buf[r][c] = ' ';
     cursor_row = 0; cursor_col = 0;
+    /* View returns to live; the ring itself survives a clear, as in
+       a real terminal (scrollback is history, not screen). */
+    sb_view = 0;
     console_redraw_text();
 }
 
 static void scroll(void) {
+    /* Save the line scrolling off into the scrollback ring first. */
+    for (int c = 0; c < COLS; c++) sb_lines[sb_head][c] = text_buf[0][c];
+    sb_head = (sb_head + 1) % SB_LINES;
+    if (sb_count < SB_LINES) sb_count++;
     for (u16 r = 0; r < ROWS - 1; r++)
         for (u16 c = 0; c < COLS; c++) text_buf[r][c] = text_buf[r + 1][c];
     for (u16 c = 0; c < COLS; c++) text_buf[ROWS - 1][c] = ' ';
     cursor_row = ROWS - 1;
 }
 
+/* Draw the current view window: the 25 rows ending sb_view lines
+   back from live. Ring lines come first (oldest), then the live
+   screen rows. The cursor is drawn only in live view — it belongs
+   to the live prompt, not to history. */
+static void render_view(void) {
+    if (!fb_ready()) return;
+    fb_clear(0x000000);
+    int total = sb_count + ROWS;
+    int top = total - ROWS - sb_view;
+    for (int r = 0; r < ROWS; r++) {
+        int li = top + r;
+        const char *line;
+        if (li < sb_count) {
+            int idx = sb_head - sb_count + li;
+            if (idx < 0) idx += SB_LINES;
+            line = sb_lines[idx];
+        } else {
+            line = text_buf[li - sb_count];
+        }
+        for (int c = 0; c < COLS; c++)
+            fb_draw_char((s32)c * 8, (s32)r * 16, line[c], 0x00FFFFFF, 0x00000000);
+    }
+    if (sb_view == 0 && cursor_row < ROWS && cursor_col < COLS) {
+        char ch = text_buf[cursor_row][cursor_col];
+        fb_draw_char((s32)cursor_col * 8, (s32)cursor_row * 16, ch, 0x00000000, 0x00FFFFFF);
+    }
+    fb_present();
+}
+
+/* PgUp: one 25-line page older, clamped to the ring. PgDn: one page
+   newer, clamped to live. Framebuffer-text mode only: VGA text has
+   no back buffer to render history into. */
+void console_scroll_up(void) {
+    if (!fb_mode || fb_suppressed) return;
+    if (sb_view < sb_count) {
+        sb_view += ROWS;
+        if (sb_view > sb_count) sb_view = sb_count;
+        render_view();
+    }
+}
+void console_scroll_down(void) {
+    if (!fb_mode || fb_suppressed) return;
+    if (sb_view > 0) {
+        sb_view -= ROWS;
+        if (sb_view < 0) sb_view = 0;
+        render_view();
+    }
+}
+
 void console_putchar(char ch) {
     serial_putchar(ch);
+    /* Any new output returns the view to live: history viewing ends
+       the moment something prints. A full repaint follows below, so
+       the stale history window cannot linger under new output. */
+    int was_viewing = (sb_view != 0);
+    if (was_viewing) sb_view = 0;
     u16 old_row = cursor_row, old_col = cursor_col;
     if (ch == '\n') { cursor_col = 0; cursor_row++; }
     else if (ch == '\r') { cursor_col = 0; }
@@ -95,8 +170,8 @@ void console_putchar(char ch) {
     }
     int scrolled = 0;
     if (cursor_row >= ROWS) { scroll(); scrolled = 1; }
-    if (fb_mode) {
-        if (scrolled) { render_fb(); return; }
+    if (fb_mode && !fb_suppressed) {
+        if (scrolled || was_viewing) { render_fb(); return; }
         /* Erase the old cursor cell (normal colours), then draw the
            new cursor cell inverted. Only two glyphs per character,
            so a busy log stays fast. */
