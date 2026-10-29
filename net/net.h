@@ -87,12 +87,37 @@ int  net_tcp_connected(void);
 int  net_http_get(const char *host, u16 port, const char *path, char *buf, u32 max);
 int  net_fetch_truncated(void);
 void net_set_fetch_truncated(int v);
+/* Single-request cores with the Phase 4 HTTP layer (net/http.c):
+   like the plain getters, but they also report the HTTP status
+   and Location value, send an optional Cookie header, and store
+   Set-Cookie lines when store_cookies is set. status_out and
+   loc_out may be NULL/0 (Location is then still parsed for
+   cookies but not returned). The plain getters above call these
+   with NULL/0 and are unchanged in behaviour except for the
+   shared header polish (case-insensitive headers, chunked
+   bodies) — still exactly one request, no redirects, no jar. */
+int  http_get_single(const char *host, u16 port, const char *path, char *buf, u32 max,
+                     const char *cookie_hdr, int store_cookies,
+                     int *status_out, char *loc_out, u32 loc_max);
+int  https_get_single(int mode, const char *host, u16 port, const char *path, char *buf, u32 max,
+                      const char *cookie_hdr, int store_cookies,
+                      int *status_out, char *loc_out, u32 loc_max);
 
 /* TLS 1.2 client (net/tls.c). Returns body length or -1; on
    certificate failure returns -2 (refused, never "accept"). */
 int  net_https_get(const char *host, u16 port, const char *path, char *buf, u32 max);
 int  net_https_get_anchored(const char *host, u16 port, const char *path, char *buf, u32 max);
 int  net_https_get_store(const char *host, u16 port, const char *path, char *buf, u32 max);
+/* Legacy opt-in (web/SSL Phase 3): tls_set_legacy_once() arms
+   the NEXT https fetch (any trust mode) for TLS 1.1/SSLv3;
+   https_get_inner consumes the flag, and callers clear it
+   after the fetch returns. The repo path never sets it. */
+void tls_set_legacy_once(void);
+void tls_clear_legacy(void);
+/* SSLv2-Hello probe (web/SSL Phase 3): classifies a server's
+   reply to an SSLv2-format ClientHello without handshaking.
+   Returns 0 (classification printed) or -1 on connect/IO. */
+int  net_sslprobe(const char *host, u16 port);
 int  tls_tofu_print_list(void);   /* 0 ok, -1 no file/error */
 int  tls_tofu_print_clear(const char *host); /* 0 removed, 1 absent, -1 error */
 int  tls_castore_add(const char *line); /* 0 ok, 1 already present, -1 error */

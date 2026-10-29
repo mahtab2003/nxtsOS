@@ -12,6 +12,13 @@ Usage: python3 tests/qemu_test_scroll.py <iso> <workdir>
 Exit 0 only if all checks pass."""
 import os, re, socket, subprocess, sys, time
 ISO, WORK = sys.argv[1:3]
+# The kernel banner/ver string must match VERSION; read it from
+# the repo root instead of hardcoding a release number (a stale
+# literal failed this suite on the v1.1.4 ISO, where the kernel
+# correctly reported v1.1.4).
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+with open(os.path.join(ROOT, "VERSION")) as _vf:
+    VER = _vf.read().strip()
 DISK = os.path.join(WORK, "disk.img")
 SERIAL = os.path.join(WORK, "serial.log")
 MON = os.path.join(WORK, "mon.sock")
@@ -110,7 +117,7 @@ ok = True
 log = log_text()
 for m in ["PID  NAME  UID", "pid 10  spin.elf  uid 0", "(1 background job(s))",
           "NAME                    SIZE  UID  MODE", "spin.elf",
-          "(1 files)", "(no packages installed)", "nxtsOS v1.1.3",
+          "(1 files)", "(no packages installed)", "nxtsOS v" + VER,
           "Command groups: system, session, fs, proc, pkg, net, crypto, diag, gui, test", "W" * 80]:
     f = m in log; print(f"{'PASS' if f else 'FAIL'} serial: {m[:48]}"); ok = ok and f
 for bad in ["EXCEPTION", "PANIC", "page fault"]:

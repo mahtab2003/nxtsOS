@@ -33,8 +33,16 @@ for pid in (1, 2):
         checks.append((f"P{pid} iter {i}", f"P{pid} iter {i}" in log))
 checks.append(("All user processes finished.",
                "All user processes finished." in log))
+# The prompt check must search AFTER the finish line for the real
+# prompt: log.find("nxts> ") alone always hits the early notice
+# ("The nxts> shell prompt will appear when they finish"),
+# which precedes the finish line and fails every run even
+# though the prompt itself is present. Require "root@nxts> "
+# after the finish line instead (stricter, not weaker).
+i_fin = log.find("All user processes finished.")
 checks.append(("Shell prompt after processes",
-               log.find("nxts> ") > log.find("All user processes finished.")))
+               i_fin >= 0 and
+               log.find("root@nxts> ", i_fin) > i_fin))
 # Preemption proof: P1 iter 1 occurs during P2's first busy loop.
 i_p1_1 = log.find("P1 iter 1")
 i_p2_1 = log.find("P2 iter 1")

@@ -15,6 +15,7 @@
 #include "../drivers/keyboard.h"
 #include "../fs/vfs.h"
 #include "../net/net.h"
+#include "../net/http.h"
 
 static char session_name[32];
 static u32 session_uid = 0;
@@ -373,10 +374,12 @@ static const struct help_entry help_table[] = {
     {"ping", "net", "ping <ip>", "Ping a dotted-quad IPv4 address; reports reply or no reply."},
     {"dns", "net", "dns <name>", "Look up a hostname via the configured DNS server."},
     {"dnsset", "net", "dnsset <ip>", "Set the DNS server address (no uid gate - pre-existing)."},
-    {"http", "net", "http <host> <path> [port]", "Fetch a page over plain HTTP (default port 80)."},
-    {"https", "net", "https <host> <path> [port]", "Fetch over TLS 1.3/1.2, TOFU trust (default port 443)."},
-    {"httpsa", "net", "httpsa <host> <path> [port]", "Fetch over TLS, anchored trust (pinned anchor must terminate the chain)."},
-    {"httpss", "net", "httpss <host> <path> [port]", "Fetch over TLS, CA-store trust (castore.txt)."},
+    {"http", "net", "http [--no-redirect] [--no-cookies] <host> <path> [port]", "Fetch a page over plain HTTP (default port 80). Redirects are followed (max 5 hops) and cookies kept in a jar unless disabled."},
+    {"cookies", "net", "cookies list | cookies clear", "List the HTTP cookie jar (name, domain, path, Secure, expiry) or clear it."},
+    {"https", "net", "https [--legacy] [--no-redirect] [--no-cookies] <host> <path> [port]", "Fetch over TLS 1.3/1.2, TOFU trust (default port 443). --legacy fetches over TLS 1.1/SSLv3 instead (INSECURE LEGACY, old servers only). Redirects are followed (max 5 hops, never https to http) and cookies kept in a jar unless disabled."},
+    {"httpsa", "net", "httpsa [--legacy] [--no-redirect] [--no-cookies] <host> <path> [port]", "Fetch over TLS, anchored trust (pinned anchor must terminate the chain). --legacy fetches over TLS 1.1/SSLv3 instead. Redirects and cookies as for https."},
+    {"httpss", "net", "httpss [--legacy] [--no-redirect] [--no-cookies] <host> <path> [port]", "Fetch over TLS, CA-store trust (castore.txt). --legacy fetches over TLS 1.1/SSLv3 instead. Redirects and cookies as for https."},
+    {"sslprobe", "net", "sslprobe <host> [port]", "Send an SSLv2-format ClientHello and classify the reply (SSLv2 SERVER_HELLO, TLS ServerHello version, alert, or no reply) without establishing a session."},
     {"castore", "net", "castore list|add <file>|update <host> [port]|clear", "Manage the CA store (root for add/update/clear)."},
     {"castore list", "net", "castore list", "Count well-formed roots in castore.txt."},
     {"castore add", "net", "castore add <file>", "Root only: add one store line from a file (RSA modulus or EC256: point)."},
@@ -487,6 +490,65 @@ static int help_first_word(const char *rest, char *out, u32 cap) {
 }
 
 /* Returns 1 if the shell loop should exit (logout). */
+/* Fetch-argument parsing (Phase 4, shared by http/https/httpsa/
+   httpss): leading --flags in any order, then <host> <path>
+   [port]. Flags: --legacy (TLS only), --no-redirect,
+   --no-cookies. The port keeps the old lenient rule (an
+   invalid port word leaves the default). Returns 0 ok, -1 on
+   a usage error (unknown flag, --legacy on plain HTTP, or a
+   missing host/path). Mutates first/rest with NUL splits, like
+   the old per-command parsers did. */
+#define FETCH_F_LEGACY 1
+#define FETCH_F_NOREDIR 2
+#define FETCH_F_NOCOOKIES 4
+static int parse_fetch_args(char *first, char *rest, int allow_legacy,
+                            u16 def_port, char **host_out, char **path_out,
+                            u16 *port_out, int *flags_out) {
+    int flags = 0;
+    char *host = first;
+    char *path = rest;
+    if (!host || !host[0]) return -1;
+    /* Consume leading flags: each flag shifts host to the first
+       word of path and path to the text after it. */
+    while (host[0] == '-' && host[1] == '-') {
+        if (strcmp(host, "--legacy") == 0) {
+            if (!allow_legacy) return -1;
+            flags |= FETCH_F_LEGACY;
+        } else if (strcmp(host, "--no-redirect") == 0) {
+            flags |= FETCH_F_NOREDIR;
+        } else if (strcmp(host, "--no-cookies") == 0) {
+            flags |= FETCH_F_NOCOOKIES;
+        } else {
+            return -1;
+        }
+        if (!path || !path[0]) return -1;
+        host = path;
+        char *sp = path;
+        while (*sp && *sp != ' ') sp++;
+        if (*sp) { *sp = 0; sp++; while (*sp == ' ') sp++; path = sp; }
+        else path = (char *)"";
+    }
+    if (!path || !path[0]) return -1;
+    /* Split path at its first space; the remainder is the port. */
+    char *sp = path;
+    while (*sp && *sp != ' ') sp++;
+    u16 port = def_port;
+    if (*sp) {
+        *sp = 0; sp++;
+        while (*sp == ' ') sp++;
+        if (*sp) {
+            int v = 0, ok = 1;
+            for (const char *p = sp; *p && *p != ' '; p++) {
+                if (*p < '0' || *p > '9') { ok = 0; break; }
+                v = v * 10 + (*p - '0');
+            }
+            if (ok && v >= 1 && v <= 65535) port = (u16)v;
+        }
+    }
+    *host_out = host; *path_out = path; *port_out = port; *flags_out = flags;
+    return 0;
+}
+
 static int execute(char *line) {
     char *tok[4];
     char *rest = 0;
@@ -627,7 +689,7 @@ static int execute(char *line) {
     } else if (strcmp(tok[0], "ver") == 0) {
         /* Version literal, kept in sync by build.sh's VERSION check
            (same grep as the main.c banner and the wm.c About text). */
-        console_write("nxtsOS v1.1.3\n");
+        console_write("nxtsOS v1.1.4\n");
     } else if (strcmp(tok[0], "reboot") == 0) {
         console_write("Rebooting...\n");
         outb(0x64, 0xFE);
@@ -1023,96 +1085,115 @@ static int execute(char *line) {
         /* Tokenizer quirk (kept for `write`): after 2 tokens the
            remainder is `rest`, so path/port come from rest, not
            tok[2]/tok[3]. */
-        if (n < 2 || !rest || !rest[0]) { console_write("Usage: http <host> <path> [port]\n"); return 0; }
-        char *path = rest;
-        char *sp = path;
-        while (*sp && *sp != ' ') sp++;
-        u16 port = 80;
-        if (*sp) {
-            *sp = 0; sp++;
-            while (*sp == ' ') sp++;
-            if (*sp) {
-                int v = 0, ok = 1;
-                for (const char *p = sp; *p && *p != ' '; p++) {
-                    if (*p < '0' || *p > '9') { ok = 0; break; }
-                    v = v * 10 + (*p - '0');
-                }
-                if (ok && v >= 1 && v <= 65535) port = (u16)v;
-            }
+        if (n < 2) { console_write("Usage: http [--no-redirect] [--no-cookies] <host> <path> [port]\n"); return 0; }
+        char *host, *path;
+        u16 port;
+        int fflags;
+        if (parse_fetch_args(tok[1], rest, 0, 80, &host, &path, &port, &fflags) != 0) {
+            console_write("Usage: http [--no-redirect] [--no-cookies] <host> <path> [port]\n"); return 0;
         }
         static char body[8192];
-        int bl = net_http_get(tok[1], port, path, body, sizeof(body));
-        if (bl < 0) console_write("http: failed\n");
+        int flags = HTTP_FETCH_FOLLOW_REDIRECT | HTTP_FETCH_USE_COOKIES;
+        if (fflags & FETCH_F_NOREDIR) flags &= ~HTTP_FETCH_FOLLOW_REDIRECT;
+        if (fflags & FETCH_F_NOCOOKIES) flags &= ~HTTP_FETCH_USE_COOKIES;
+        int bl = net_http_fetch(host, port, path, body, sizeof(body), flags);
+        if (bl == -4) console_printf("http: %s\n", net_http_fetch_error());
+        else if (bl < 0) {
+            const char *e = net_http_fetch_error();
+            if (e && e[0]) console_printf("http: %s\n", e);
+            else console_write("http: failed\n");
+        }
         else console_printf("http: %d bytes%s\n%s\n", bl, net_fetch_truncated() ? " (truncated)" : "", body);
     } else if (strcmp(tok[0], "https") == 0) {
-        if (n < 2 || !rest || !rest[0]) { console_write("Usage: https <host> <path> [port]\n"); return 0; }
-        char *path = rest;
-        char *sp = path;
-        while (*sp && *sp != ' ') sp++;
-        u16 port = 443;
-        if (*sp) {
-            *sp = 0; sp++;
-            while (*sp == ' ') sp++;
-            if (*sp) {
-                int v = 0, ok = 1;
-                for (const char *p = sp; *p && *p != ' '; p++) {
-                    if (*p < '0' || *p > '9') { ok = 0; break; }
-                    v = v * 10 + (*p - '0');
-                }
-                if (ok && v >= 1 && v <= 65535) port = (u16)v;
-            }
+        if (n < 2) { console_write("Usage: https [--legacy] [--no-redirect] [--no-cookies] <host> <path> [port]\n"); return 0; }
+        char *host, *path;
+        u16 port;
+        int fflags;
+        if (parse_fetch_args(tok[1], rest, 1, 443, &host, &path, &port, &fflags) != 0) {
+            console_write("Usage: https [--legacy] [--no-redirect] [--no-cookies] <host> <path> [port]\n"); return 0;
         }
         static char body[8192];
-        int bl = net_https_get(tok[1], port, path, body, sizeof(body));
+        if (fflags & FETCH_F_LEGACY) tls_set_legacy_once();
+        int flags = HTTP_FETCH_FOLLOW_REDIRECT | HTTP_FETCH_USE_COOKIES;
+        if (fflags & FETCH_F_NOREDIR) flags &= ~HTTP_FETCH_FOLLOW_REDIRECT;
+        if (fflags & FETCH_F_NOCOOKIES) flags &= ~HTTP_FETCH_USE_COOKIES;
+        int bl = net_https_fetch(0, host, port, path, body, sizeof(body), flags);
+        tls_clear_legacy();
         if (bl == -2) console_write("https: certificate refused, connection not made\n");
-        else if (bl < 0) console_write("https: failed\n");
+        else if (bl == -4) console_printf("https: %s\n", net_http_fetch_error());
+        else if (bl < 0) {
+            const char *e = net_http_fetch_error();
+            if (e && e[0]) console_printf("https: %s\n", e);
+            else console_write("https: failed\n");
+        }
         else console_printf("https: %d bytes%s\n%s\n", bl, net_fetch_truncated() ? " (truncated)" : "", body);
     } else if (strcmp(tok[0], "httpsa") == 0) {
-        if (n < 2 || !rest || !rest[0]) { console_write("Usage: httpsa <host> <path> [port]\n"); return 0; }
-        char *path = rest;
-        char *sp = path;
-        while (*sp && *sp != ' ') sp++;
-        u16 port = 443;
-        if (*sp) {
-            *sp = 0; sp++;
-            while (*sp == ' ') sp++;
-            if (*sp) {
-                int v = 0, ok = 1;
-                for (const char *p = sp; *p && *p != ' '; p++) {
-                    if (*p < '0' || *p > '9') { ok = 0; break; }
-                    v = v * 10 + (*p - '0');
-                }
-                if (ok && v >= 1 && v <= 65535) port = (u16)v;
-            }
+        if (n < 2) { console_write("Usage: httpsa [--legacy] [--no-redirect] [--no-cookies] <host> <path> [port]\n"); return 0; }
+        char *host, *path;
+        u16 port;
+        int fflags;
+        if (parse_fetch_args(tok[1], rest, 1, 443, &host, &path, &port, &fflags) != 0) {
+            console_write("Usage: httpsa [--legacy] [--no-redirect] [--no-cookies] <host> <path> [port]\n"); return 0;
         }
         static char body[8192];
-        int bl = net_https_get_anchored(tok[1], port, path, body, sizeof(body));
+        if (fflags & FETCH_F_LEGACY) tls_set_legacy_once();
+        int flags = HTTP_FETCH_FOLLOW_REDIRECT | HTTP_FETCH_USE_COOKIES;
+        if (fflags & FETCH_F_NOREDIR) flags &= ~HTTP_FETCH_FOLLOW_REDIRECT;
+        if (fflags & FETCH_F_NOCOOKIES) flags &= ~HTTP_FETCH_USE_COOKIES;
+        int bl = net_https_fetch(1, host, port, path, body, sizeof(body), flags);
+        tls_clear_legacy();
         if (bl == -2) console_write("httpsa: certificate refused, connection not made\n");
-        else if (bl < 0) console_write("httpsa: failed\n");
+        else if (bl == -4) console_printf("httpsa: %s\n", net_http_fetch_error());
+        else if (bl < 0) {
+            const char *e = net_http_fetch_error();
+            if (e && e[0]) console_printf("httpsa: %s\n", e);
+            else console_write("httpsa: failed\n");
+        }
         else console_printf("httpsa: %d bytes%s\n%s\n", bl, net_fetch_truncated() ? " (truncated)" : "", body);
     } else if (strcmp(tok[0], "httpss") == 0) {
-        if (n < 2 || !rest || !rest[0]) { console_write("Usage: httpss <host> <path> [port]\n"); return 0; }
-        char *path = rest;
-        char *sp = path;
-        while (*sp && *sp != ' ') sp++;
-        u16 port = 443;
-        if (*sp) {
-            *sp = 0; sp++;
-            while (*sp == ' ') sp++;
-            if (*sp) {
-                int v = 0, ok = 1;
-                for (const char *p = sp; *p && *p != ' '; p++) {
-                    if (*p < '0' || *p > '9') { ok = 0; break; }
-                    v = v * 10 + (*p - '0');
-                }
-                if (ok && v >= 1 && v <= 65535) port = (u16)v;
-            }
+        if (n < 2) { console_write("Usage: httpss [--legacy] [--no-redirect] [--no-cookies] <host> <path> [port]\n"); return 0; }
+        char *host, *path;
+        u16 port;
+        int fflags;
+        if (parse_fetch_args(tok[1], rest, 1, 443, &host, &path, &port, &fflags) != 0) {
+            console_write("Usage: httpss [--legacy] [--no-redirect] [--no-cookies] <host> <path> [port]\n"); return 0;
         }
         static char body[8192];
-        int bl = net_https_get_store(tok[1], port, path, body, sizeof(body));
+        if (fflags & FETCH_F_LEGACY) tls_set_legacy_once();
+        int flags = HTTP_FETCH_FOLLOW_REDIRECT | HTTP_FETCH_USE_COOKIES;
+        if (fflags & FETCH_F_NOREDIR) flags &= ~HTTP_FETCH_FOLLOW_REDIRECT;
+        if (fflags & FETCH_F_NOCOOKIES) flags &= ~HTTP_FETCH_USE_COOKIES;
+        int bl = net_https_fetch(2, host, port, path, body, sizeof(body), flags);
+        tls_clear_legacy();
         if (bl == -2) console_write("httpss: certificate refused, connection not made\n");
-        else if (bl < 0) console_write("httpss: failed\n");
+        else if (bl == -4) console_printf("httpss: %s\n", net_http_fetch_error());
+        else if (bl < 0) {
+            const char *e = net_http_fetch_error();
+            if (e && e[0]) console_printf("httpss: %s\n", e);
+            else console_write("httpss: failed\n");
+        }
         else console_printf("httpss: %d bytes%s\n%s\n", bl, net_fetch_truncated() ? " (truncated)" : "", body);
+    } else if (strcmp(tok[0], "cookies") == 0) {
+        if (n < 2) { console_write("Usage: cookies list | cookies clear\n"); return 0; }
+        if (strcmp(tok[1], "list") == 0) http_cookies_list();
+        else if (strcmp(tok[1], "clear") == 0) {
+            int c = http_cookies_clear();
+            console_printf("cookies cleared: %d\n", c);
+        } else console_write("Usage: cookies list | cookies clear\n");
+    } else if (strcmp(tok[0], "sslprobe") == 0) {
+        if (n < 2) { console_write("Usage: sslprobe <host> [port]\n"); return 0; }
+        /* Host is tok[1]; the optional port is the first word
+           of rest (rest is NULL when no port is given). */
+        u16 port = 443;
+        if (rest && rest[0]) {
+            int v = 0, ok = 1;
+            for (const char *p = rest; *p && *p != ' '; p++) {
+                if (*p < '0' || *p > '9') { ok = 0; break; }
+                v = v * 10 + (*p - '0');
+            }
+            if (ok && v >= 1 && v <= 65535) port = (u16)v;
+        }
+        if (net_sslprobe(tok[1], port) != 0) console_write("sslprobe: failed\n");
     } else if (strcmp(tok[0], "csprngtest") == 0) {
         console_write(csprng_selftest() == 0 ? "csprngtest PASS\n" : "csprngtest FAIL\n");
     } else if (strcmp(tok[0], "castore") == 0) {

@@ -11,6 +11,7 @@
 #include "../fs/vfs.h"
 #include "proc.h"
 #include "../net/net.h"
+#include "../net/http.h"
 #include "pkg.h"
 #include "sha256.h"
 
@@ -1793,7 +1794,7 @@ static void desk_draw_about_content(int idx, s32 dx, s32 dy, s32 dw, s32 dh) {
     struct window *wn = &wins[idx];
     s32 x = wn->x, y = wn->y;
     s32 cx = x + 1, cy = y + TITLE_H + 1, cw = wn->w - 2, ch = wn->h - TITLE_H - 2;
-    draw_text2(x + 10, y + 32, "nxtsOS v1.1.3", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    draw_text2(x + 10, y + 32, "nxtsOS v1.1.4", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
     draw_text2(x + 10, y + 52, "Original kernel, Multiboot, 32-bit x86.", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
     draw_text2(x + 10, y + 72, "Not a Linux distribution or fork.", 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
     char buf[64];
@@ -1828,6 +1829,7 @@ static int desk_net_ping_focused = 0;
 static char desk_web_body[8192];
 static u32 desk_web_len = 0;
 static char desk_web_status[128];
+static int desk_web_legacy = 0; /* Web Legacy toggle: OFF = modern only, ON = legacy fetch */
 static char desk_web_save[64];
 static int desk_web_save_len = 0;
 static int desk_web_save_focused = 0;
@@ -1949,6 +1951,20 @@ static int desk_open_network(void) {
     if (!net_present()) console_write("network: no device\n");
     return find_by_id(id);
 }
+/* Prefix the Web status line with the permanent INSECURE
+   LEGACY marker (called for every legacy fetch, on every
+   exit path; the next fetch replaces the status, so the
+   marker never lingers past its fetch). */
+static void desk_web_mark_legacy(void) {
+    char tmp[128];
+    int n = 0;
+    const char *p = "INSECURE LEGACY: ";
+    while (*p) tmp[n++] = *p++;
+    for (int i = 0; desk_web_status[i] && n < 127; i++) tmp[n++] = desk_web_status[i];
+    tmp[n] = 0;
+    set_msg(desk_web_status, tmp);
+}
+
 /* Web fetch: parse "host[:port][/path]" with optional http(s)://
    prefix. Returns body length, or -1 failed, -2 cert refused. */
 static int desk_web_fetch(const char *addr) {
@@ -1973,8 +1989,16 @@ static int desk_web_fetch(const char *addr) {
     path[pi] = 0;
     if (hi == 0) return -1;
     int r;
-    if (tls) r = net_https_get(host, port, path, desk_web_body, sizeof(desk_web_body));
-    else r = net_http_get(host, port, path, desk_web_body, sizeof(desk_web_body));
+    int legacy = tls && desk_web_legacy;
+    if (legacy) tls_set_legacy_once();
+    /* Phase 4: the Web fetch follows redirects and uses the
+       cookie jar like the shell commands (same policies:
+       no https->http downgrade, no legacy across hops). */
+    if (tls) r = net_https_fetch(0, host, port, path, desk_web_body, sizeof(desk_web_body),
+                                 HTTP_FETCH_FOLLOW_REDIRECT | HTTP_FETCH_USE_COOKIES);
+    else r = net_http_fetch(host, port, path, desk_web_body, sizeof(desk_web_body),
+                            HTTP_FETCH_FOLLOW_REDIRECT | HTTP_FETCH_USE_COOKIES);
+    tls_clear_legacy();
     if (r >= 0) {
         desk_web_len = (u32)r;
         desk_web_body[desk_web_len < sizeof(desk_web_body) ? desk_web_len : sizeof(desk_web_body) - 1] = 0;
@@ -1987,14 +2011,21 @@ static int desk_web_fetch(const char *addr) {
             int t=0; while (num[t]) tmp[n++]=num[t++];
             tmp[n++]=' '; tmp[n++]='b'; tmp[n++]='y'; tmp[n++]='t'; tmp[n++]='e'; tmp[n++]='s'; tmp[n]=0;
             set_msg(desk_web_status, tmp);
-            console_printf("web: fetched %u bytes\n", desk_web_len);
+            if (legacy) console_printf("web: fetched %u bytes (INSECURE LEGACY)\n", desk_web_len);
+            else console_printf("web: fetched %u bytes\n", desk_web_len);
         }
+        if (legacy) desk_web_mark_legacy();
         return r;
     }
     desk_web_len = 0; desk_web_body[0] = 0;
-    if (r == -2) { set_msg(desk_web_status, "certificate refused"); console_write("web: certificate refused\n"); return -2; }
+    if (r == -2) { set_msg(desk_web_status, "certificate refused"); console_write("web: certificate refused\n"); if (legacy) desk_web_mark_legacy(); return -2; }
     set_msg(desk_web_status, "fetch failed");
-    console_write("web: fetch failed\n");
+    {
+        const char *e = net_http_fetch_error();
+        if (e && e[0]) console_printf("web: %s\n", e);
+        else console_write("web: fetch failed\n");
+    }
+    if (legacy) desk_web_mark_legacy();
     return -1;
 }
 static void desk_draw_web_content(int idx, s32 dx, s32 dy, s32 dw, s32 dh) {
@@ -2007,11 +2038,16 @@ static void desk_draw_web_content(int idx, s32 dx, s32 dy, s32 dw, s32 dh) {
     if (wn->field_focused) fb_fill_rect_clip(x + 84 + wn->field_len * 8, y + 32, 2, 16, 0x00000000u, dx, dy, dw, dh);
     fb_fill_rect_clip(x + 10, y + 64, 100, 24, 0x00C0C0C0u, dx, dy, dw, dh);
     draw_text2(x + 18, y + 68, "Fetch", 0x00000000u, 0x00C0C0C0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    /* Legacy toggle (Fetch coordinates UNCHANGED, so existing
+       desktop tests' Fetch clicks still land; the status text
+       moves right to make room). */
+    fb_fill_rect_clip(x + 120, y + 64, 110, 24, 0x00C0C0C0u, dx, dy, dw, dh);
+    draw_text2(x + 128, y + 68, desk_web_legacy ? "Legacy: ON" : "Legacy: OFF", 0x00000000u, 0x00C0C0C0u, cx, cy, cw, ch, dx, dy, dw, dh);
     fb_fill_rect_clip(x + w - 120, y + 64, 50, 24, 0x00C0C0C0u, dx, dy, dw, dh);
     draw_text2(x + w - 102, y + 68, "Up", 0x00000000u, 0x00C0C0C0u, cx, cy, cw, ch, dx, dy, dw, dh);
     fb_fill_rect_clip(x + w - 60, y + 64, 50, 24, 0x00C0C0C0u, dx, dy, dw, dh);
     draw_text2(x + w - 42, y + 68, "Down", 0x00000000u, 0x00C0C0C0u, cx, cy, cw, ch, dx, dy, dw, dh);
-    draw_text2(x + 130, y + 68, desk_web_status, 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
+    draw_text2(x + 240, y + 68, desk_web_status, 0x00000000u, 0x00D0D0D0u, cx, cy, cw, ch, dx, dy, dw, dh);
     /* Web Save row: a fetched page can be kept on disk,
        which the viewer alone never allowed — a desktop
        user fetching a text file had no way to save it
@@ -2058,6 +2094,7 @@ static int desk_open_web(void) {
         wins[idx].field[0] = 0; wins[idx].field_len = 0; wins[idx].field_focused = 0;
         wins[idx].aux1 = 0;
         desk_web_status[0] = 0; desk_web_len = 0; desk_web_body[0] = 0;
+        desk_web_legacy = 0;
         desk_web_save[0] = 0; desk_web_save_len = 0; desk_web_save_focused = 0;
         console_write("Desktop: Web opened\n");
     }
@@ -6130,6 +6167,7 @@ static int wm_desktop_internal(int autotest) {
                                 desk_web_save_focused = 0;
                                 if (inside(mx, my, wn->x + 80, wn->y + 28, wn->w - 100, 24)) wn->field_focused = 1;
                                 else if (inside(mx, my, wn->x + 10, wn->y + 64, 100, 24)) { desk_web_fetch(wn->field); wn->aux1 = 0; desk_redraw(); }
+                                else if (inside(mx, my, wn->x + 120, wn->y + 64, 110, 24)) { desk_web_legacy = !desk_web_legacy; desk_redraw(); }
                                 else if (inside(mx, my, wn->x + wn->w - 120, wn->y + 64, 50, 24)) { if (wn->aux1 > 0) wn->aux1--; desk_redraw(); }
                                 else if (inside(mx, my, wn->x + wn->w - 60, wn->y + 64, 50, 24)) { wn->aux1++; desk_redraw(); }
                                 else if (inside(mx, my, wn->x + 80, wn->y + 352, 300, 24)) desk_web_save_focused = 1;

@@ -6,6 +6,7 @@
    Counters: net_drop_count in e1000.c counts driver-level
    drops; stack drops are counted here in stack_drops. */
 #include "net.h"
+#include "http.h"
 #include "../drivers/pit.h"
 
 static ip_t our_ip, netmask_ip, gateway_ip, dns_ip;
@@ -542,20 +543,30 @@ int net_parse_ip(const char *s, ip_t *out) {
     }
     return parts == 4;
 }
-int net_http_get(const char *host, u16 port, const char *path, char *buf, u32 max) {
+int http_get_single(const char *host, u16 port, const char *path, char *buf, u32 max,
+                    const char *cookie_hdr, int store_cookies,
+                    int *status_out, char *loc_out, u32 loc_max) {
     if (max < 2) return -1;
     ip_t hip;
     if (!net_parse_ip(host, &hip)) {
         if (net_dns_lookup(host, &hip) != 0) return -1;
     }
     if (net_tcp_connect(hip, port) != 0) return -1;
-    char req[512];
+    char req[1024];
     int ri = 0;
     const char *p;
     p = "GET "; while (*p) req[ri++] = *p++;
     p = path; while (*p && ri < 400) req[ri++] = *p++;
     p = " HTTP/1.0\r\nHost: "; while (*p) req[ri++] = *p++;
     p = host; while (*p && ri < 480) req[ri++] = *p++;
+    /* Phase 4 headers: fixed headers always fit (ri <= 484).
+       The Cookie header is sent whole or not at all, with
+       room left for the final CRLFCRLF + NUL. */
+    p = "\r\nUser-Agent: nxtsOS\r\nAccept: */*\r\nConnection: close"; while (*p) req[ri++] = *p++;
+    if (cookie_hdr && cookie_hdr[0] && ri + (int)strlen(cookie_hdr) + 14 < 1024) {
+        p = "\r\nCookie: "; while (*p) req[ri++] = *p++;
+        p = cookie_hdr; while (*p) req[ri++] = *p++;
+    }
     p = "\r\n\r\n"; while (*p) req[ri++] = *p++;
     req[ri] = 0;
     if (net_tcp_send((const u8 *)req, (u32)ri) != 0) { net_tcp_close(); return -1; }
@@ -618,21 +629,49 @@ int net_http_get(const char *host, u16 port, const char *path, char *buf, u32 ma
                         break;
                     }
                 }
-                /* Chunked transfer is not supported in v0.9.0:
-                   HTTP/1.0 requests normally avoid it. */
-                for (u32 i = 0; i + 17 < header_end; i++) {
-                    if (memcmp(buf + i, "Transfer-Encoding:", 18) == 0) {
-                        net_tcp_close(); return -1;
-                    }
-                }
             }
         }
         if (header_end && content_len != 0xFFFFFFFFu && seen >= header_end + content_len) break;
     }
     net_tcp_close();
     if (!header_end) return -1;
-    u32 body_len = total - header_end;
-    memmove(buf, buf + header_end, body_len);
-    buf[body_len] = 0;
+    /* Phase 4 response parsing (shared with the TLS core):
+       status, authoritative Content-Length (conflicting
+       duplicates refused), chunked handling, Location, and
+       Set-Cookie storage. The in-loop scan above stays as the
+       early-completion heuristic only. */
+    if (header_end > HTTP_MAX_HEADER) return -1;
+    int status = http_parse_status(buf, header_end);
+    if (status < 0) return -1;
+    u32 clen;
+    if (http_content_length(buf, header_end, &clen) != 0) return -1;
+    int chunked = http_is_chunked(buf, header_end);
+    if (chunked < 0) return -1;
+    if (chunked && clen != 0xFFFFFFFFu) return -1;
+    if (loc_out && loc_max) {
+        if (http_header_value(buf, header_end, "Location", loc_out, loc_max) != 0)
+            loc_out[0] = 0;
+    }
+    if (store_cookies) http_store_all_cookies(buf, header_end, host, path, 0);
+    u32 body_len;
+    if (chunked) {
+        if (http_chunked_decode(buf, header_end, total, net_fetch_truncated(), &body_len) != 0)
+            return -1;
+    } else if (clen != 0xFFFFFFFFu) {
+        u32 avail = total > header_end ? total - header_end : 0;
+        body_len = avail < clen ? avail : clen;
+        memmove(buf, buf + header_end, body_len);
+        buf[body_len] = 0;
+    } else {
+        body_len = total > header_end ? total - header_end : 0;
+        memmove(buf, buf + header_end, body_len);
+        buf[body_len] = 0;
+    }
+    if (status_out) *status_out = status;
     return (int)body_len;
+}
+int net_http_get(const char *host, u16 port, const char *path, char *buf, u32 max) {
+    /* Unchanged contract: exactly one request, no redirects,
+       no cookie jar (the repo path depends on this). */
+    return http_get_single(host, port, path, buf, max, 0, 0, 0, 0, 0);
 }

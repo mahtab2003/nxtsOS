@@ -16,6 +16,13 @@ Exit 0 only if all checks pass. QEMU is always terminated.
 """
 import os, socket, subprocess, sys, time
 ISO, WORK = sys.argv[1:3]
+# The kernel banner/ver string must match VERSION; read it from
+# the repo root instead of hardcoding a release number (a stale
+# literal failed this suite on the v1.1.4 ISO, where the kernel
+# correctly reported v1.1.4).
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+with open(os.path.join(ROOT, "VERSION")) as _vf:
+    VER = _vf.read().strip()
 SERIAL = os.path.join(WORK, "serial.log")
 MON = os.path.join(WORK, "mon.sock")
 KEYMAP = {" ": "spc", ".": "dot", "-": "minus", "_": "shift-minus"}
@@ -106,7 +113,7 @@ for m in [
     "ping: bad IP",
     "csprngtest PASS",
     "No filesystem mounted",
-    "nxtsOS v1.1.3",
+    "nxtsOS v" + VER,
     "castore: no store",
     # pkg group help.
     "Group pkg: Packages and system updates",

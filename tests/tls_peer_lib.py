@@ -49,9 +49,13 @@ def tcp_pkt(dst_ip, src_ip, dport, sport, seq, ack, flags, payload=b"", mss=Fals
 class NetPeer:
     """Socket-netdev peer: DHCP/DNS/ARP + TCP relay (same rules
     as qemu_test_tls_peer.py). Subclasses drive the TLS layer:
-    SslPeer via python ssl, RawPeer via a hand-built flight."""
+    SslPeer via python ssl, RawPeer via a hand-built flight.
+    tcp_port is the guest-facing TCP port (443 default; the
+    Phase 4 plain-HTTP peer uses 80). listen_port is the QEMU
+    socket-netdev port, a different thing."""
 
-    def __init__(self, listen_port, debug_path=None):
+    def __init__(self, listen_port, debug_path=None, tcp_port=443):
+        self.tcp_port = tcp_port
         self.dbg = open(debug_path, "w") if debug_path else None
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         deadline = time.time() + 15
@@ -148,7 +152,7 @@ class NetPeer:
         self.log(f"PEER> flags=0x{flags:02x} seq={self.tcp_my_seq} "
                  f"ack={self.tcp_guest_seq} len={len(payload)}")
         pkt = tcp_pkt(self.tcp_peer_ip, PEER_IP, self.tcp_guest_port,
-                      443, self.tcp_my_seq, self.tcp_guest_seq,
+                      self.tcp_port, self.tcp_my_seq, self.tcp_guest_seq,
                       flags, payload, mss)
         self.send(eth(src_mac, PEER_MAC, 0x0800, pkt))
         if payload:
@@ -185,7 +189,7 @@ class NetPeer:
         flags = tcp[13]
         data = tcp[doff:]
         self.tcp_peer_ip = src_ip
-        if dport != 443: return
+        if dport != self.tcp_port: return
         if flags & 0x04:
             self.tcp_reset()
             return
@@ -295,17 +299,41 @@ class SslPeer(NetPeer):
     cipher) per connection for the test to assert on."""
 
     def __init__(self, chain_files, routes, listen_port, debug_path=None,
-                 min_version=None, max_version=None, ciphers=None):
+                 min_version=None, max_version=None, ciphers=None,
+                 seclevel0=False, raw_routes=None):
+        self.ctxs = []
         self.ctxs = []
         for cert_path, key_path in chain_files:
             ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             ctx.minimum_version = min_version if min_version is not None else ssl.TLSVersion.TLSv1_2
             ctx.maximum_version = max_version if max_version is not None else ssl.TLSVersion.TLSv1_2
-            ctx.set_ciphers(ciphers if ciphers is not None else "AES128-GCM-SHA256")
+            cipher_str = ciphers if ciphers is not None else "AES128-GCM-SHA256"
+            if seclevel0:
+                # Fixture-only escape hatch: OpenSSL at the
+                # default security level refuses even to LOAD
+                # a SHA-1-signed chain (CA_MD_TOO_WEAK). The
+                # legacy suite's sha1-default boot needs a
+                # real TLS 1.2 peer serving a SHA-1 leaf so
+                # the guest's modern-mode refusal is proven
+                # against a live handshake, not a canned
+                # record. Default behaviour is unchanged.
+                cipher_str += "@SECLEVEL=0"
+            ctx.set_ciphers(cipher_str)
             ctx.load_cert_chain(cert_path, key_path)
             ctx.set_alpn_protocols(["http/1.1"])
             self.ctxs.append(ctx)
         self.routes = routes
+        # Phase 4 additions (defaults preserve old behaviour):
+        # raw_routes maps a path to the complete response bytes
+        # (for redirects, Set-Cookie, chunked bodies); requests
+        # records (path, raw request bytes) per connection, so a
+        # test can assert Cookie/Host headers on later hops.
+        self.raw_routes = raw_routes or {}
+        self.requests = []
+        # Phase 4: the set of servable paths, so a test can
+        # filter its request log to known routes (see
+        # qemu_test_http.py's reqs() note).
+        self.table = set(routes) | set(self.raw_routes)
         self.ssl_errors = []
         self.conn_count = 0
         self.negotiated = []
@@ -357,12 +385,16 @@ class SslPeer(NetPeer):
                         line = self.app_buf.split(b"\r\n", 1)[0].decode("latin1")
                         parts = line.split(" ")
                         path = parts[1] if len(parts) >= 2 else "/"
-                        body = self.routes.get(path)
-                        if body is None:
-                            resp = b"HTTP/1.0 404 Not Found\r\nContent-Length: 0\r\n\r\n"
+                        self.requests.append((path, bytes(self.app_buf)))
+                        if path in self.raw_routes:
+                            resp = self.raw_routes[path]
                         else:
-                            resp = (b"HTTP/1.0 200 OK\r\nContent-Length: "
-                                    + str(len(body)).encode() + b"\r\n\r\n" + body)
+                            body = self.routes.get(path)
+                            if body is None:
+                                resp = b"HTTP/1.0 404 Not Found\r\nContent-Length: 0\r\n\r\n"
+                            else:
+                                resp = (b"HTTP/1.0 200 OK\r\nContent-Length: "
+                                        + str(len(body)).encode() + b"\r\n\r\n" + body)
                         self.log(f"SSL> serving {path} -> {len(resp)} bytes")
                         self.sslobj.write(resp)
                         self.responded = True

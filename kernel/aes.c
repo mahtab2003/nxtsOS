@@ -20,6 +20,7 @@ static u8 gf_inv(u8 a) {
 }
 static u8 rotl8(u8 x, int n) { return (u8)((x << n) | (x >> (8 - n))); }
 static u8 sbox[256];
+static u8 inv_sbox[256];
 static int sbox_ready = 0;
 static void sbox_init(void) {
     if (sbox_ready) return;
@@ -27,6 +28,7 @@ static void sbox_init(void) {
         u8 inv = gf_inv((u8)i);
         sbox[i] = (u8)(inv ^ rotl8(inv, 1) ^ rotl8(inv, 2) ^ rotl8(inv, 3) ^ rotl8(inv, 4) ^ 0x63);
     }
+    for (u32 i = 0; i < 256; i++) inv_sbox[sbox[i]] = (u8)i;
     sbox_ready = 1;
 }
 static u8 rcon(int i) {
@@ -123,4 +125,62 @@ void aes256_encrypt(const u32 rk[60], const u8 in[16], u8 out[16]) {
 }
 void aes128_encrypt(const u32 rk[44], const u8 in[16], u8 out[16]) {
     aes_encrypt_nr(rk, in, out, 10);
+}
+
+/* Inverse cipher (FIPS 197 §5.3): AddRoundKey, then per round
+   InvShiftRows + InvSubBytes + AddRoundKey + InvMixColumns,
+   finishing with InvShiftRows + InvSubBytes + AddRoundKey(0).
+   Used by legacy CBC decryption (web/SSL Phase 3). */
+static void aes_decrypt_nr(const u32 *rk, const u8 in[16], u8 out[16], int nr) {
+    sbox_init();
+    /* State is column-major: state[r][c] = in[r + 4*c]. */
+    u8 s[4][4];
+    for (int c = 0; c < 4; c++) for (int r = 0; r < 4; r++) s[r][c] = in[r + 4*c];
+    /* AddRoundKey, round nr. */
+    for (int c = 0; c < 4; c++) {
+        u32 w = rk[nr * 4 + c];
+        for (int r = 0; r < 4; r++) s[r][c] ^= (u8)((w >> (24 - r*8)) & 0xFF);
+    }
+    for (int round = nr - 1; round >= 1; round--) {
+        /* InvShiftRows: row r shifts right by r. */
+        for (int r = 1; r < 4; r++) {
+            u8 tmp[4];
+            for (int c = 0; c < 4; c++) tmp[c] = s[r][(c - r + 4) % 4];
+            for (int c = 0; c < 4; c++) s[r][c] = tmp[c];
+        }
+        /* InvSubBytes. */
+        for (int c = 0; c < 4; c++) for (int r = 0; r < 4; r++) s[r][c] = inv_sbox[s[r][c]];
+        /* AddRoundKey, round `round`. */
+        for (int c = 0; c < 4; c++) {
+            u32 w = rk[round * 4 + c];
+            for (int r = 0; r < 4; r++) s[r][c] ^= (u8)((w >> (24 - r*8)) & 0xFF);
+        }
+        /* InvMixColumns. */
+        for (int c = 0; c < 4; c++) {
+            u8 a0 = s[0][c], a1 = s[1][c], a2 = s[2][c], a3 = s[3][c];
+            s[0][c] = (u8)(gf_mul(a0, 14) ^ gf_mul(a1, 11) ^ gf_mul(a2, 13) ^ gf_mul(a3, 9));
+            s[1][c] = (u8)(gf_mul(a0, 9) ^ gf_mul(a1, 14) ^ gf_mul(a2, 11) ^ gf_mul(a3, 13));
+            s[2][c] = (u8)(gf_mul(a0, 13) ^ gf_mul(a1, 9) ^ gf_mul(a2, 14) ^ gf_mul(a3, 11));
+            s[3][c] = (u8)(gf_mul(a0, 11) ^ gf_mul(a1, 13) ^ gf_mul(a2, 9) ^ gf_mul(a3, 14));
+        }
+    }
+    /* Final round: InvShiftRows + InvSubBytes + AddRoundKey(0). */
+    for (int r = 1; r < 4; r++) {
+        u8 tmp[4];
+        for (int c = 0; c < 4; c++) tmp[c] = s[r][(c - r + 4) % 4];
+        for (int c = 0; c < 4; c++) s[r][c] = tmp[c];
+    }
+    for (int c = 0; c < 4; c++) for (int r = 0; r < 4; r++) s[r][c] = inv_sbox[s[r][c]];
+    for (int c = 0; c < 4; c++) {
+        u32 w = rk[c];
+        for (int r = 0; r < 4; r++) s[r][c] ^= (u8)((w >> (24 - r*8)) & 0xFF);
+    }
+    for (int c = 0; c < 4; c++) for (int r = 0; r < 4; r++) out[r + 4*c] = s[r][c];
+}
+
+void aes256_decrypt(const u32 rk[60], const u8 in[16], u8 out[16]) {
+    aes_decrypt_nr(rk, in, out, 14);
+}
+void aes128_decrypt(const u32 rk[44], const u8 in[16], u8 out[16]) {
+    aes_decrypt_nr(rk, in, out, 10);
 }

@@ -100,10 +100,10 @@ gcc $CFLAGS -c kernel/switch.S -o build/switch.o
 gcc $CFLAGS -c kernel/syscall.S -o build/syscall_asm.o
 gcc $CFLAGS -c kernel/user_blob.S -o build/user_blob.o
 for f in kernel/util.c kernel/console.c kernel/panic.c kernel/shell.c kernel/main.c \
-         kernel/proc.c kernel/syscall.c kernel/users.c kernel/elf.c kernel/sha256.c kernel/pkg.c kernel/aes.c kernel/enc.c kernel/fb.c kernel/wm.c kernel/csprng.c \
+         kernel/proc.c kernel/syscall.c kernel/users.c kernel/elf.c kernel/sha256.c kernel/md5.c kernel/sha1.c kernel/pkg.c kernel/aes.c kernel/enc.c kernel/fb.c kernel/wm.c kernel/csprng.c \
          drivers/serial.c drivers/idt.c drivers/pic.c drivers/pit.c drivers/keyboard.c drivers/mouse.c \
          drivers/gdt.c drivers/ata.c fs/nxtsfs.c mm/pmm.c mm/vmm.c \
-         net/e1000.c net/net.c net/tcp.c net/tls.c net/nettest.c net/bignum.c net/rsaverify.c net/ec256.c; do
+         net/e1000.c net/net.c net/tcp.c net/tls.c net/http.c net/nettest.c net/bignum.c net/rsaverify.c net/ec256.c; do
     o="build/$(basename "$f" .c).o"
     echo "cc $f -> $o"
     gcc $CFLAGS -c "$f" -o "$o"
@@ -114,9 +114,9 @@ echo "--- linking ---"
 gcc -m32 -no-pie -Wl,--build-id=none -T boot/linker.ld -nostdlib -o build/nxtsOS.bin \
     build/boot.o build/isr.o build/gdt_asm.o build/switch.o build/syscall_asm.o \
     build/user_blob.o build/util.o build/console.o build/panic.o \
-    build/shell.o build/main.o build/proc.o build/syscall.o build/users.o build/elf.o build/sha256.o build/pkg.o build/aes.o build/enc.o build/fb.o build/wm.o build/csprng.o build/serial.o build/idt.o \
+    build/shell.o build/main.o build/proc.o build/syscall.o build/users.o build/elf.o build/sha256.o build/md5.o build/sha1.o build/pkg.o build/aes.o build/enc.o build/fb.o build/wm.o build/csprng.o build/serial.o build/idt.o \
     build/pic.o build/pit.o build/keyboard.o build/mouse.o build/gdt.o build/ata.o build/nxtsfs.o build/pmm.o build/vmm.o \
-    build/e1000.o build/net.o build/tcp.o build/tls.o build/nettest.o build/bignum.o build/rsaverify.o build/ec256.o
+    build/e1000.o build/net.o build/tcp.o build/tls.o build/http.o build/nettest.o build/bignum.o build/rsaverify.o build/ec256.o
 ls -l build/nxtsOS.bin
 if command -v grub-file >/dev/null 2>&1; then
     grub-file --is-x86-multiboot build/nxtsOS.bin && echo "grub-file: multiboot OK"

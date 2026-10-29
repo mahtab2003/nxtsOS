@@ -8,6 +8,67 @@
 > contemporary notes, and no test result is claimed here beyond what
 > those reports record. Entries 0.1.0–0.2.0 are the original notes.
 
+## 1.1.4 — Accumulation release: web/SSL Phases 3–4 (legacy protocols + HTTP layer)
+
+- Web/SSL Phase 3: TLS 1.1 + SSLv3 client (single suite
+  TLS_RSA_WITH_AES_128_CBC_SHA), new CBC record layer
+  (explicit CSPRNG IVs per record, full pad-byte checks;
+  SSLv3 MAC pad1/pad2, not HMAC), TLS 1.1 MD5+SHA1 PRF and
+  SSLv3's own MD5/SHA1 construction; new crypto
+  `kernel/md5.c`, `kernel/sha1.c`, AES decrypt; SHA-1
+  certificates gated to legacy handshakes only (modern
+  mode still refuses them); SSLv2-Hello probe command
+  `sslprobe` (net group, dedicated help entry). Opt-in
+  per connection only: `--legacy` flag + Web Legacy toggle
+  (every legacy fetch labelled INSECURE LEGACY),
+  single-use flag consumed at handshake, never carried
+  across requests; default still offers TLS 1.3 + 1.2
+  only; no silent downgrade either way; the package repo
+  stays modern-only anchored. Full SSLv2 session crypto
+  and ECDHE-CBC deliberately out. See docs/WEB_SSL.md.
+- Web/SSL Phase 4: HTTP layer in `net/http.c` (shared
+  response parser: 4096-byte header cap, case-insensitive
+  names, Content-Length/Transfer-Encoding rules; chunked
+  decoding with extensions and trailers; 16-entry
+  memory-only cookie jar; redirect resolver for
+  301/302/303/307/308, max 5 hops, loop refusal, relative
+  resolution). Shell `http`/`https`/`httpsa`/`httpss` gain
+  `--legacy`/`--no-redirect`/`--no-cookies`; new `cookies
+  list|clear`. The raw single-request getters keep their
+  exact contract (repo + `castore update` untouched).
+  Security: https→http downgrade refused before fetching;
+  the legacy flag is never re-armed across redirects;
+  Secure cookies are TLS-only; the hostname check applies
+  on every hop. Deliberately out: HTTP/2, WebSocket, HTML
+  rendering, Expires parsing, cookie persistence, proxy,
+  HTTP server. See docs/WEB_SSL.md.
+- Security pass (adversarial, this release): no exploitable
+  finding in the new surfaces — new host harness
+  `tests/host_http_sec.c` 83/83 PASS and new QEMU
+  hostile-peer suite `tests/qemu_test_http_sec.py` 9/9
+  PASS on the release ISO; full read of `net/http.c`
+  found no exploitable bug. Carried weaknesses
+  unchanged: predictable TCP ISNs, non-atomic
+  filesystem commit, `dhcp`/`dnsset` uid gate missing,
+  early-boot CSPRNG limits, no constant-time crypto.
+  See `releases/v1.1.4/SECURITY_REPORT.md`.
+- Full regression on the release ISO: 98/98 PASS
+  (Phase A 28/28, Phase B 48/48, Phase C 11/11,
+  Phase D 11/11 incl. legacy 19/19, http 23/23,
+  host_http 43/43, host_http_sec 83/83, http_sec 9/9).
+  Six FAIL lines appeared during the run; all were
+  proven test/harness bugs or sendkey flakes and all
+  re-ran green (see `releases/v1.1.4/TEST_REPORT.md`).
+- NOT TESTED: live Vercel guest fetch from the kernel
+  (peer-harness proof only); user-side Virt-Manager
+  retests (repo commands, desktop fixes, Phases 2–4);
+  Bochs re-run for v1.1.x trees; real-pointer mouse
+  movement/clicking (scripted injection only); real
+  hardware; tampered-CertificateVerify negative (not
+  yet built); legacy vs a real old server and Phase 4
+  vs real web servers (hand-rolled peers only); Web
+  Legacy toggle click itself.
+
 ## 1.1.3 — Accumulation release: desktop/core/terminal fixes + web/SSL Phases 1–2 + shell grouping + 3 new apps
 
 - Desktop/core/terminal fixes (from the user's 2026-10-28 QEMU/KVM

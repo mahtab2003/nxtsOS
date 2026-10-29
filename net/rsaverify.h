@@ -17,6 +17,15 @@ int rsa_verify_sha256(const u8 *mod_be, u32 mod_len, u32 exp,
                       const u8 *sig, u32 sig_len,
                       const u8 *msg, u32 msg_len);
 
+/* RSA PKCS#1 v1.5 signature verification with SHA-1 (legacy
+   web/SSL Phase 3: old servers' certificates). Same shape and
+   bounds as rsa_verify_sha256, with the SHA-1 DigestInfo
+   prefix (15 bytes) and a 20-byte hash. No timing guarantees
+   are claimed, same as above. */
+int rsa_verify_sha1(const u8 *mod_be, u32 mod_len, u32 exp,
+                    const u8 *sig, u32 sig_len,
+                    const u8 *msg, u32 msg_len);
+
 /* RSASSA-PSS signature verification with SHA-256 (RFC 8017
    8.1.2), shared by the TLS 1.3 CertificateVerify handler
    (alg 0x0804) and the TLS 1.2 ServerKeyExchange handler.

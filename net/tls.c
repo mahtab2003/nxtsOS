@@ -60,6 +60,29 @@
      A ServerHello below TLS 1.2, or a TLS 1.3 downgrade
      sentinel in the ServerHello random, is a hard refusal.
      The repository path is modern-only anchored, always.
+   - Legacy (web/SSL Phase 3, OPT-IN ONLY): TLS 1.1 and SSLv3
+     clients for old servers, plus an SSLv2-Hello probe. Legacy
+     is never offered by default, never retried automatically
+     after a failed modern handshake, and never used for the
+     package repository. The user requests it explicitly per
+     connection (`https --legacy`, or the Web window's Legacy
+     toggle, which shows a permanent INSECURE LEGACY status
+     prefix). One suite only: TLS_RSA_WITH_AES_128_CBC_SHA
+     (0x002F); RSA key exchange, AES-128-CBC, HMAC-SHA1 (TLS
+     1.1) or the SSLv3 MAC (SSLv3). A legacy ServerHello with
+     a modern version (0x0303) is refused — legacy mode never
+     silently upgrades, just as default mode never silently
+     downgrades. SHA-1 certificates are accepted ONLY during
+     a legacy handshake (tls_allow_sha1_certs, cleared on
+     every handshake exit); modern mode refuses them exactly
+     as before. Full SSLv2 session crypto is NOT implemented
+     (no concrete SSLv2-only target exists; every SSLv2-era
+     server also speaks SSLv3) — only the SSLv2-format
+     ClientHello probe. SSLv3 is broken by design (POODLE,
+     BEAST-vulnerable CBC chaining) and TLS 1.1 is
+     deprecated; both are offered here only because the user
+     explicitly ordered legacy support for old servers, and
+     the INSECURE LEGACY indicator says so on every use.
    - No session resumption, no PSK, no 0-RTT (replay risk),
      no HelloRetryRequest support (a server that demands a
      different group fails closed — this client offers
@@ -87,11 +110,14 @@
      test shuffles, which are not security uses).
    - Only one connection at a time, like the TCP client. */
 #include "net.h"
+#include "http.h"
 #include "bignum.h"
 #include "rsaverify.h"
 #include "ec256.h"
 #include "tls_anchor.h"
 #include "../kernel/sha256.h"
+#include "../kernel/md5.h"
+#include "../kernel/sha1.h"
 #include "../kernel/aes.h"
 #include "../kernel/csprng.h"
 #include "../kernel/pkg.h"
@@ -362,6 +388,12 @@ static const u8 OID_EC_PUBKEY[] = {0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01};
 static const u8 OID_SECP256R1[] = {0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07};
 static const u8 OID_ECDSA_SHA256[] = {0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x02};
 static const u8 OID_CN[] = {0x55, 0x04, 0x03};
+static const u8 OID_SHA1_RSA[] = {0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x05};
+/* SHA-1 certificate gate (legacy Phase 3): set ONLY for the
+   duration of a legacy handshake by tls_handshake, cleared on
+   every exit. Modern handshakes run with this at 0, so a
+   SHA-1-signed certificate is refused exactly as before. */
+static int tls_allow_sha1_certs = 0;
 static const u8 OID_BC[] = {0x55, 0x1D, 0x13};
 static const u8 OID_SAN[] = {0x55, 0x1D, 0x11};
 
@@ -374,7 +406,7 @@ struct cert_info {
     const u8 *subject; u32 subject_len;
     char not_before[15], not_after[15];
     int key_type; /* 0 = RSA, 1 = EC P-256 */
-    int sig_alg; /* 0 = RSA/SHA-256, 1 = ECDSA P-256/SHA-256 */
+    int sig_alg; /* 0 = RSA/SHA-256, 1 = ECDSA P-256/SHA-256, 2 = RSA/SHA-1 (legacy only) */
     bn_t modulus; u32 exponent; /* RSA only */
     u8 ec_x[32], ec_y[32]; /* EC only: uncompressed point */
     const u8 *sig; u32 sig_len;
@@ -469,6 +501,8 @@ static int parse_cert(const u8 *buf, u32 len, struct cert_info *ci) {
         if (der_tlv(buf, len, alg_vp, &ot, &oh, &ov, &op) != 0 || ot != 0x06) return -1;
         if (der_oid_equal(buf + op, ov, OID_SHA256_RSA, sizeof(OID_SHA256_RSA))) ci->sig_alg = 0;
         else if (der_oid_equal(buf + op, ov, OID_ECDSA_SHA256, sizeof(OID_ECDSA_SHA256))) ci->sig_alg = 1;
+        else if (tls_allow_sha1_certs &&
+                 der_oid_equal(buf + op, ov, OID_SHA1_RSA, sizeof(OID_SHA1_RSA))) ci->sig_alg = 2;
         else return -1;
     }
     pos = pos + alg_hl + alg_vl;
@@ -493,6 +527,8 @@ static int parse_cert(const u8 *buf, u32 len, struct cert_info *ci) {
         int inner_alg;
         if (der_oid_equal(buf + op, ov, OID_SHA256_RSA, sizeof(OID_SHA256_RSA))) inner_alg = 0;
         else if (der_oid_equal(buf + op, ov, OID_ECDSA_SHA256, sizeof(OID_ECDSA_SHA256))) inner_alg = 1;
+        else if (tls_allow_sha1_certs &&
+                 der_oid_equal(buf + op, ov, OID_SHA1_RSA, sizeof(OID_SHA1_RSA))) inner_alg = 2;
         else return -1;
         if (inner_alg != ci->sig_alg) return -1;
     }
@@ -725,6 +761,21 @@ static int verify_signature(const struct cert_info *cert,
         u8 hash[32];
         sha256_compute(cert->tbs, cert->tbs_len, hash);
         return p256_ecdsa_verify(issuer->ec_x, issuer->ec_y, hash, r, s);
+    }
+    if (cert->sig_alg == 2) {
+        /* RSA/SHA-1 (legacy only: parse_cert admits sig_alg 2
+           solely while tls_allow_sha1_certs is set, i.e. during
+           a legacy handshake). */
+        if (issuer->key_type != 0) return -1;
+        int bl = bn_bitlen(&issuer->modulus);
+        u32 k = (u32)((bl + 7) / 8);
+        if (k < 35 + 11) return -1; /* too small for DigestInfo + padding */
+        u8 mod_bytes[256];
+        if (k > sizeof(mod_bytes)) return -1;
+        if (bn_to_be(&issuer->modulus, mod_bytes, k) != 0) return -1;
+        return rsa_verify_sha1(mod_bytes, k, issuer->exponent,
+                               cert->sig, cert->sig_len,
+                               cert->tbs, cert->tbs_len);
     }
     return -1;
 }
@@ -1593,7 +1644,7 @@ static int tls13_got_encrypted = 0; /* server CCS only before this */
    4 = CertificateVerify done, 5 = server Finished done,
    6 = client Finished sent. */
 static int tls13_fail_stage = 0;
-static int tls_negotiated_version = 0; /* 0 none, 1 = TLS 1.2, 2 = TLS 1.3 */
+static int tls_negotiated_version = 0; /* 0 none, 1 = TLS 1.2, 2 = TLS 1.3, 3 = TLS 1.1, 4 = SSLv3 */
 static u8 tls_ecdh_priv[32];
 static u8 tls_ecdh_pub_x[32], tls_ecdh_pub_y[32];
 static u8 tls_session_id[32];
@@ -2468,7 +2519,771 @@ static int tls13_handshake_rest(const char *host) {
 /* Dispatcher: reset all state (1.2 + 1.3), send the combined
    hello, read ServerHello, and continue on the negotiated
    version. Returns 0, -1, or -2 (certificate failure). */
-static int tls_handshake(const char *host) {
+/* ---------- Legacy (TLS 1.1 / SSLv3) client + SSLv2 probe ----------
+   Opt-in only (see the file header). One suite: 0x002F
+   (TLS_RSA_WITH_AES_128_CBC_SHA). This section is deliberately
+   separate from the GCM path: the modern record layer, PRF,
+   and handshake are untouched, and legacy state lives in its
+   own file-scope buffers. All randomness comes from the
+   CSPRNG; no xorshift anywhere in this section. */
+
+/* Single-use legacy flag: set by the shell (--legacy) or the
+   Web window (Legacy toggle) immediately before a fetch,
+   consumed by https_get_inner at handshake start, and cleared
+   again by the caller after the fetch returns — so a stale
+   flag can never leak into a later connection, and the repo
+   path (which never sets it) stays modern-only anchored by
+   construction. */
+static int tls_legacy_once = 0;
+void tls_set_legacy_once(void) { tls_legacy_once = 1; }
+void tls_clear_legacy(void) { tls_legacy_once = 0; }
+
+/* HMAC staging: a record MAC input is a 13-byte pseudo-header
+   plus a fragment up to TLS_REC_MAX, so it cannot live on the
+   16 KiB stack. Two file-scope buffers, kept separate on
+   purpose: leg_mac_buf assembles MAC inputs, leg_hmac_buf is
+   used ONLY inside hmac_md5/hmac_sha1 — otherwise a MAC over
+   data staged in leg_mac_buf would alias the HMAC's own
+   staging buffer. Single-connection use only, like the rest. */
+static u8 leg_mac_buf[TLS_REC_MAX + 256];
+static u8 leg_hmac_buf[64 + 13 + TLS_REC_MAX + 64];
+
+static void hmac_md5(const u8 *key, u32 key_len, const u8 *data, u32 data_len, u8 out[16]) {
+    u8 kbuf[64];
+    memset(kbuf, 0, sizeof(kbuf));
+    if (key_len > 64) md5_compute(key, key_len, kbuf);
+    else memcpy(kbuf, key, key_len);
+    u8 *inner = leg_hmac_buf;
+    for (int i = 0; i < 64; i++) inner[i] = (u8)(kbuf[i] ^ 0x36);
+    if (64 + data_len > sizeof(leg_hmac_buf)) return;
+    memcpy(inner + 64, data, data_len);
+    u8 ihash[16];
+    md5_compute(inner, 64 + data_len, ihash);
+    u8 outer[80];
+    for (int i = 0; i < 64; i++) outer[i] = (u8)(kbuf[i] ^ 0x5C);
+    memcpy(outer + 64, ihash, 16);
+    md5_compute(outer, 80, out);
+}
+
+static void hmac_sha1(const u8 *key, u32 key_len, const u8 *data, u32 data_len, u8 out[20]) {
+    u8 kbuf[64];
+    memset(kbuf, 0, sizeof(kbuf));
+    if (key_len > 64) sha1_compute(key, key_len, kbuf);
+    else memcpy(kbuf, key, key_len);
+    u8 *inner = leg_hmac_buf;
+    for (int i = 0; i < 64; i++) inner[i] = (u8)(kbuf[i] ^ 0x36);
+    if (64 + data_len > sizeof(leg_hmac_buf)) return;
+    memcpy(inner + 64, data, data_len);
+    u8 ihash[20];
+    sha1_compute(inner, 64 + data_len, ihash);
+    u8 outer[84];
+    for (int i = 0; i < 64; i++) outer[i] = (u8)(kbuf[i] ^ 0x5C);
+    memcpy(outer + 64, ihash, 20);
+    sha1_compute(outer, 84, out);
+}
+
+/* P_hash with MD5 / SHA-1 (TLS 1.1 PRF building blocks). */
+static void tls11_p_hash_md5(const u8 *secret, u32 secret_len, const u8 *label_seed, u32 ls_len, u8 *out, u32 out_len) {
+    u8 a[16], buf[16 + 256];
+    hmac_md5(secret, secret_len, label_seed, ls_len, a);
+    u32 done = 0;
+    while (done < out_len) {
+        if (16 + ls_len > sizeof(buf)) return;
+        memcpy(buf, a, 16);
+        memcpy(buf + 16, label_seed, ls_len);
+        u8 chunk[16];
+        hmac_md5(secret, secret_len, buf, 16 + ls_len, chunk);
+        u32 take = out_len - done < 16 ? out_len - done : 16;
+        memcpy(out + done, chunk, take);
+        done += take;
+        u8 anext[16];
+        hmac_md5(secret, secret_len, a, 16, anext);
+        memcpy(a, anext, 16);
+    }
+}
+
+static void tls11_p_hash_sha1(const u8 *secret, u32 secret_len, const u8 *label_seed, u32 ls_len, u8 *out, u32 out_len) {
+    u8 a[20], buf[20 + 256];
+    hmac_sha1(secret, secret_len, label_seed, ls_len, a);
+    u32 done = 0;
+    while (done < out_len) {
+        if (20 + ls_len > sizeof(buf)) return;
+        memcpy(buf, a, 20);
+        memcpy(buf + 20, label_seed, ls_len);
+        u8 chunk[20];
+        hmac_sha1(secret, secret_len, buf, 20 + ls_len, chunk);
+        u32 take = out_len - done < 20 ? out_len - done : 20;
+        memcpy(out + done, chunk, take);
+        done += take;
+        u8 anext[20];
+        hmac_sha1(secret, secret_len, a, 20, anext);
+        memcpy(a, anext, 20);
+    }
+}
+
+/* TLS 1.1 PRF (RFC 4346 5): PRF = P_MD5(S1) XOR P_SHA1(S2),
+   S1 = first half of the secret, S2 = second half (the halves
+   overlap by one byte when the secret length is odd; for the
+   48-byte secrets used here they are exactly 24/24). */
+static void tls11_prf(const u8 *secret, u32 secret_len, const char *label, const u8 *seed, u32 seed_len, u8 *out, u32 out_len) {
+    u8 label_seed[256];
+    u32 ls_len = 0;
+    while (label[ls_len] && ls_len < 200) { label_seed[ls_len] = (u8)label[ls_len]; ls_len++; }
+    if (ls_len + seed_len > sizeof(label_seed)) return;
+    memcpy(label_seed + ls_len, seed, seed_len);
+    ls_len += seed_len;
+    u32 half = (secret_len + 1) / 2;
+    const u8 *s1 = secret, *s2 = secret + secret_len - half;
+    u8 p_md5[256], p_sha1[256];
+    if (out_len > sizeof(p_md5)) return;
+    tls11_p_hash_md5(s1, half, label_seed, ls_len, p_md5, out_len);
+    tls11_p_hash_sha1(s2, half, label_seed, ls_len, p_sha1, out_len);
+    for (u32 i = 0; i < out_len; i++) out[i] = (u8)(p_md5[i] ^ p_sha1[i]);
+}
+
+/* SSLv3 master secret (RFC 6101 6.2.2): three rounds, labels
+   "A", "BB", "CCC"; each round is MD5(premaster ||
+   SHA1(label || premaster || client_random || server_random)). */
+static void ssl3_master(const u8 *premaster, const u8 *client_random, const u8 *server_random, u8 out[48]) {
+    static const char *labels[3] = { "A", "BB", "CCC" };
+    for (int round = 0; round < 3; round++) {
+        u32 ll = (u32)round + 1;
+        u8 inner_in[115];
+        memcpy(inner_in, labels[round], ll);
+        memcpy(inner_in + ll, premaster, 48);
+        memcpy(inner_in + ll + 48, client_random, 32);
+        memcpy(inner_in + ll + 80, server_random, 32);
+        u8 ihash[20];
+        sha1_compute(inner_in, ll + 112, ihash);
+        u8 outer_in[68];
+        memcpy(outer_in, premaster, 48);
+        memcpy(outer_in + 48, ihash, 20);
+        md5_compute(outer_in, 68, out + round * 16);
+    }
+}
+
+/* SSLv3 key block (RFC 6101 6.2.3): same construction as the
+   master secret, but the randoms swap order (server_random
+   first) and the labels continue "A", "BB", "CCC", "DDDD",
+   ... until out_len bytes. Layout: client MAC (20) ||
+   server MAC (20) || client key (16) || server key (16) ||
+   client IV (16) || server IV (16). */
+static void ssl3_key_block(const u8 *master, const u8 *server_random, const u8 *client_random, u8 *out, u32 out_len) {
+    u32 done = 0;
+    for (int round = 0; done < out_len; round++) {
+        u32 ll = (u32)round + 1;
+        if (ll > 16) return;
+        u8 label[16];
+        for (u32 i = 0; i < ll; i++) label[i] = (u8)('A' + round);
+        u8 inner_in[128];
+        memcpy(inner_in, label, ll);
+        memcpy(inner_in + ll, master, 48);
+        memcpy(inner_in + ll + 48, server_random, 32);
+        memcpy(inner_in + ll + 80, client_random, 32);
+        u8 ihash[20];
+        sha1_compute(inner_in, ll + 112, ihash);
+        u8 outer_in[68];
+        memcpy(outer_in, master, 48);
+        memcpy(outer_in + 48, ihash, 20);
+        u8 chunk[16];
+        md5_compute(outer_in, 68, chunk);
+        u32 take = out_len - done < 16 ? out_len - done : 16;
+        memcpy(out + done, chunk, take);
+        done += take;
+    }
+}
+
+/* SSLv3 Finished verify_data (36 bytes, RFC 6101 5.6):
+   MD5(master || pad1 || MD5(msgs || sender || master || pad1))
+   || SHA1(master || pad1 || SHA1(msgs || sender || master ||
+   pad1)), pad1 = 0x36 x 48, sender = "CLNT" (client) or "SRVR"
+   (server). msgs is the handshake transcript so far (headers
+   included, same as the TLS transcript). */
+static void ssl3_finished(const u8 *master, const u8 *msgs, u32 msgs_len, int is_client, u8 out[36]) {
+    const u8 *sender = is_client ? (const u8 *)"CLNT" : (const u8 *)"SRVR";
+    u8 *buf = leg_mac_buf;
+    u32 in_len = msgs_len + 4 + 48 + 48;
+    if (in_len > sizeof(leg_mac_buf)) return;
+    memcpy(buf, msgs, msgs_len);
+    memcpy(buf + msgs_len, sender, 4);
+    memcpy(buf + msgs_len + 4, master, 48);
+    for (int i = 0; i < 48; i++) buf[msgs_len + 52 + i] = 0x36;
+    u8 inner_md5[16], inner_sha1[20];
+    md5_compute(buf, in_len, inner_md5);
+    sha1_compute(buf, in_len, inner_sha1);
+    u8 outer[116];
+    memcpy(outer, master, 48);
+    for (int i = 0; i < 48; i++) outer[48 + i] = 0x36;
+    memcpy(outer + 96, inner_md5, 16);
+    md5_compute(outer, 112, out);
+    memcpy(outer + 96, inner_sha1, 20);
+    sha1_compute(outer, 116, out + 16);
+}
+
+/* SSLv3 record MAC (RFC 6101 5.2.2.1): inner = SHA1(secret ||
+   pad1 || seq || type || length || fragment); outer =
+   SHA1(secret || pad2 || inner). pad1 = 0x36 x 48, pad2 =
+   0x5c x 48. NOTE: this is NOT HMAC (different pads, no
+   key hashing) — that is the SSLv3 construction, kept exact. */
+static void ssl3_mac(const u8 *secret, u32 seq, u8 type, const u8 *frag, u32 frag_len, u8 out[20]) {
+    u8 *buf = leg_mac_buf;
+    u32 in_len = 20 + 48 + 8 + 1 + 2 + frag_len;
+    if (in_len > sizeof(leg_mac_buf)) return;
+    memcpy(buf, secret, 20);
+    for (int i = 0; i < 48; i++) buf[20 + i] = 0x36;
+    memset(buf + 68, 0, 4); /* seq is 64-bit on the wire */
+    tput32(buf + 72, seq);
+    buf[76] = type;
+    tput16(buf + 77, (u16)frag_len);
+    memcpy(buf + 79, frag, frag_len);
+    u8 inner[20];
+    sha1_compute(buf, in_len, inner);
+    u8 outer[88];
+    memcpy(outer, secret, 20);
+    for (int i = 0; i < 48; i++) outer[20 + i] = 0x5c;
+    memcpy(outer + 68, inner, 20);
+    sha1_compute(outer, 88, out);
+}
+
+/* TLS 1.1 record MAC: HMAC-SHA1(key, seq(8) || type ||
+   version(0x0302) || length || fragment). */
+static void tls11_mac(const u8 *key, u32 seq, u8 type, const u8 *frag, u32 frag_len, u8 out[20]) {
+    u8 hdr[13];
+    memset(hdr, 0, 4); /* seq is 64-bit on the wire */
+    tput32(hdr + 4, seq);
+    hdr[8] = type;
+    hdr[9] = 0x03; hdr[10] = 0x02;
+    tput16(hdr + 11, (u16)frag_len);
+    u8 *buf = leg_mac_buf;
+    if (13 + frag_len > sizeof(leg_mac_buf)) return;
+    memcpy(buf, hdr, 13);
+    memcpy(buf + 13, frag, frag_len);
+    hmac_sha1(key, 20, buf, 13 + frag_len, out);
+}
+
+/* ---------- Legacy record layer state ---------- */
+static u8 leg_rec_buf[TLS_REC_MAX + 64];
+static u8 leg_plain[TLS_REC_MAX + 64];
+static u8 leg_payload_buf[TLS_REC_MAX + 64];
+static u8 leg_hs_buf[TLS_REC_MAX + 64];
+static u32 leg_hs_len = 0;
+static u8 leg_client_key[16], leg_server_key[16];
+static u8 leg_client_mac[20], leg_server_mac[20];
+static u8 leg_client_iv[16], leg_server_iv[16];
+static u32 leg_client_rk[44], leg_server_rk[44];
+static u32 leg_send_seq = 0, leg_recv_seq = 0;
+static int leg_client_enc = 0, leg_server_enc = 0;
+static int leg_version = 0; /* 0x0302 TLS 1.1, 0x0300 SSLv3 */
+static int leg_version_set = 0;
+static u8 leg_app_spill[TLS_REC_MAX];
+static u32 leg_app_spill_len = 0, leg_app_spill_pos = 0;
+
+/* Read one legacy record. Plaintext (decrypted + MAC-verified
+   if leg_server_enc) is left in leg_rec_buf. Returns the
+   record type, or -1. MAC failures fail the connection (no
+   retry, no fallback); a bad pad or MAC never yields data. */
+static int leg_recv_record(u32 *out_len) {
+    u8 hdr[5];
+    if (tcp_read_exact(hdr, 5, 1000) != 0) return -1;
+    u8 type = hdr[0];
+    if (type != 20 && type != 21 && type != 22 && type != 23) return -1;
+    /* Pre-negotiation, a 0x0303 record is passed up, not
+       dropped: only the ServerHello dispatch can refuse a
+       modern answer with the specific "use default mode"
+       message. The dispatch still refuses every version but
+       0x0302/0x0300, so this admits no upgrade — it only
+       improves the diagnostic. Once negotiated, the version
+       is enforced exactly (next line). */
+    if (hdr[1] != 0x03 || (hdr[2] != 0x02 && hdr[2] != 0x00 &&
+                           !(hdr[2] == 0x03 && !leg_version_set))) return -1;
+    if (leg_version_set && hdr[2] != (u8)(leg_version & 0xFF)) return -1;
+    u32 len = tget16(hdr + 3);
+    if (len == 0 || len > TLS_REC_MAX) return -1;
+    if (tcp_read_exact(leg_rec_buf, len, 1000) != 0) return -1;
+    if (!leg_server_enc) { *out_len = len; return type; }
+    if (type != 22 && type != 23) return -1;
+    /* CBC decrypt (AES-128). TLS 1.1: the explicit IV prefixes
+       the ciphertext. SSLv3: the IV chains from the previous
+       ciphertext block (key-block IV for the first record). */
+    u8 iv[16];
+    u32 off = 0;
+    if (leg_version == 0x0302) {
+        if (len < 16 + 16) return -1;
+        memcpy(iv, leg_rec_buf, 16);
+        off = 16;
+    } else {
+        memcpy(iv, leg_server_iv, 16);
+    }
+    u32 clen = len - off;
+    if (clen == 0 || clen % 16 != 0) return -1;
+    u8 prev[16];
+    memcpy(prev, iv, 16);
+    for (u32 i = 0; i < clen; i += 16) {
+        u8 dec[16];
+        aes128_decrypt(leg_server_rk, leg_rec_buf + off + i, dec);
+        for (int j = 0; j < 16; j++) leg_plain[i + j] = (u8)(dec[j] ^ prev[j]);
+        memcpy(prev, leg_rec_buf + off + i, 16);
+    }
+    if (leg_version == 0x0300) memcpy(leg_server_iv, leg_rec_buf + off + clen - 16, 16);
+    /* Strip padding + MAC: plaintext = data || MAC(20) ||
+       padding(pad_len + 1 bytes, last byte = pad_len). TLS
+       checks EVERY pad byte; SSLv3 checks only the length
+       byte (SSLv3 padding content is arbitrary by spec). */
+    u32 plain_len = clen;
+    if (plain_len < 20 + 1) return -1;
+    u32 pad_len = leg_plain[plain_len - 1];
+    if (pad_len + 1 + 20 > plain_len) return -1;
+    if (leg_version == 0x0302) {
+        for (u32 i = 0; i <= pad_len; i++)
+            if (leg_plain[plain_len - 1 - i] != (u8)pad_len) return -1;
+    }
+    u32 frag_len = plain_len - pad_len - 1 - 20;
+    const u8 *mac = leg_plain + frag_len;
+    u8 expect[20];
+    if (leg_version == 0x0302) tls11_mac(leg_server_mac, leg_recv_seq, type, leg_plain, frag_len, expect);
+    else ssl3_mac(leg_server_mac, leg_recv_seq, type, leg_plain, frag_len, expect);
+    if (memcmp(mac, expect, 20) != 0) return -1;
+    leg_recv_seq++;
+    memcpy(leg_rec_buf, leg_plain, frag_len);
+    *out_len = frag_len;
+    return type;
+}
+
+/* Send one legacy record (plaintext; MAC-then-encrypt with
+   CBC if leg_client_enc and the type is not CCS — CCS itself
+   is never encrypted, same as the modern path). */
+static int leg_send_record(u8 type, const u8 *data, u32 len) {
+    u8 hdr[5];
+    u8 ver_lo = leg_version_set ? (u8)(leg_version & 0xFF) : 0x02;
+    hdr[0] = type; hdr[1] = 0x03; hdr[2] = ver_lo;
+    if (!leg_client_enc || type == 20) {
+        tput16(hdr + 3, (u16)len);
+        if (net_tcp_send(hdr, 5) != 0) return -1;
+        if (len > 0 && net_tcp_send(data, len) != 0) return -1;
+        return 0;
+    }
+    if (len > TLS_REC_MAX) return -1;
+    u8 mac[20];
+    if (leg_version == 0x0302) tls11_mac(leg_client_mac, leg_send_seq, type, data, len, mac);
+    else ssl3_mac(leg_client_mac, leg_send_seq, type, data, len, mac);
+    u32 total = len + 20;
+    u32 pad_len = (u32)((15 - (total & 15)) & 15);
+    memcpy(leg_plain, data, len);
+    memcpy(leg_plain + len, mac, 20);
+    for (u32 i = 0; i <= pad_len; i++) leg_plain[total + i] = (u8)pad_len;
+    u32 plain_len = total + pad_len + 1;
+    u32 off = 0;
+    if (leg_version == 0x0302) {
+        csprng_generate(leg_payload_buf, 16); /* explicit IV */
+        off = 16;
+    }
+    u8 prev[16];
+    if (leg_version == 0x0302) memcpy(prev, leg_payload_buf, 16);
+    else memcpy(prev, leg_client_iv, 16);
+    for (u32 i = 0; i < plain_len; i += 16) {
+        u8 block[16];
+        for (int j = 0; j < 16; j++) block[j] = (u8)(leg_plain[i + j] ^ prev[j]);
+        aes128_encrypt(leg_client_rk, block, leg_payload_buf + off + i);
+        memcpy(prev, leg_payload_buf + off + i, 16);
+    }
+    if (leg_version == 0x0300) memcpy(leg_client_iv, prev, 16);
+    u32 wire_len = off + plain_len;
+    tput16(hdr + 3, (u16)wire_len);
+    if (net_tcp_send(hdr, 5) != 0) return -1;
+    if (net_tcp_send(leg_payload_buf, wire_len) != 0) return -1;
+    leg_send_seq++;
+    return 0;
+}
+
+/* Send one legacy handshake message (appends to the shared
+   transcript, same discipline as tls_send_hs). */
+static int leg_send_hs(u8 type, const u8 *body, u32 body_len) {
+    u8 msg[2048];
+    if (body_len + 4 > sizeof(msg)) return -1;
+    msg[0] = type;
+    tput24(msg + 1, body_len);
+    memcpy(msg + 4, body, body_len);
+    if (transcript_append(msg, body_len + 4) != 0) return -1;
+    return leg_send_record(22, msg, body_len + 4);
+}
+
+/* Read the next complete legacy handshake message into
+   msg_out (returns its type, or -1). Same stream-reassembly
+   shape as tls_next_hs. */
+static int leg_next_hs(u8 *msg_out, u32 max, u32 *msg_len_out) {
+    while (1) {
+        if (leg_hs_len >= 4) {
+            u32 body_len = tget24(leg_hs_buf + 1);
+            if (body_len + 4 <= max && leg_hs_len >= body_len + 4) {
+                u8 type = leg_hs_buf[0];
+                memcpy(msg_out, leg_hs_buf, body_len + 4);
+                memmove(leg_hs_buf, leg_hs_buf + body_len + 4,
+                        leg_hs_len - (body_len + 4));
+                leg_hs_len -= body_len + 4;
+                *msg_len_out = body_len + 4;
+                return type;
+            }
+            if (body_len + 4 > max) return -1;
+        }
+        u32 rec_len = 0;
+        int rtype = leg_recv_record(&rec_len);
+        if (rtype != 22) return -1;
+        if (leg_hs_len + rec_len > sizeof(leg_hs_buf)) return -1;
+        memcpy(leg_hs_buf + leg_hs_len, leg_rec_buf, rec_len);
+        leg_hs_len += rec_len;
+    }
+}
+
+/* Legacy handshake (TLS 1.1 / SSLv3), opt-in only. Returns 0,
+   -1 (protocol/IO failure), -2 (certificate failure — never
+   fall through to plaintext). The single offered version is
+   0x0302; the server's ServerHello version selects the path
+   (0x0302 -> TLS 1.1, 0x0300 -> SSLv3). A modern ServerHello
+   (0x0303) is refused: legacy mode never silently upgrades. */
+static int leg_handshake(const char *host) {
+    /* msg is a static buffer: an 8 KiB stack array would
+       leave almost no room on the 16 KiB kernel stack. */
+    u8 *msg = tls_msg_buf;
+    u32 msg_len = 0;
+    int mtype;
+    leg_hs_len = 0;
+    tls_transcript_len = 0;
+    leg_send_seq = 0; leg_recv_seq = 0;
+    leg_client_enc = 0; leg_server_enc = 0;
+    leg_version = 0; leg_version_set = 0;
+    leg_app_spill_len = 0; leg_app_spill_pos = 0;
+    /* ClientHello: version 0x0302, suite [0x002F], null
+       compression, NO extensions (per the design: no
+       SNI/ALPN in legacy negotiation; the hostname check
+       still applies to whatever certificate arrives). */
+    csprng_generate(tls_client_random, 32);
+    u8 hello[64];
+    u32 pos = 0;
+    hello[pos++] = 0x03; hello[pos++] = 0x02;
+    memcpy(hello + pos, tls_client_random, 32); pos += 32;
+    hello[pos++] = 0; /* session id length */
+    tput16(hello + pos, 2); pos += 2;
+    tput16(hello + pos, 0x002F); pos += 2;
+    hello[pos++] = 1; hello[pos++] = 0; /* null compression */
+    u8 ch[128];
+    ch[0] = 1; /* ClientHello */
+    tput24(ch + 1, pos);
+    memcpy(ch + 4, hello, pos);
+    if (transcript_append(ch, pos + 4) != 0) return -1;
+    if (leg_send_record(22, ch, pos + 4) != 0) return -1;
+    /* ServerHello: version selects the path. */
+    mtype = leg_next_hs(msg, 8192, &msg_len);
+    if (mtype != 2) return -1;
+    const u8 *sh = msg + 4;
+    u32 sh_len = msg_len - 4;
+    if (sh_len < 34) return -1;
+    if (sh[0] == 0x03 && sh[1] == 0x02) leg_version = 0x0302;
+    else if (sh[0] == 0x03 && sh[1] == 0x00) leg_version = 0x0300;
+    else {
+        console_printf("legacy: refused ServerHello version %u.%u (use default mode)\n", sh[0], sh[1]);
+        return -1;
+    }
+    leg_version_set = 1;
+    memcpy(tls_server_random, sh + 2, 32);
+    u32 spos = 34;
+    if (spos >= sh_len) return -1;
+    u32 sid_len = sh[spos++];
+    if (spos + sid_len + 2 + 1 > sh_len) return -1;
+    spos += sid_len;
+    if (tget16(sh + spos) != 0x002F) return -1;
+    spos += 2;
+    if (sh[spos] != 0) return -1; /* compression must be null */
+    spos++;
+    /* TLS 1.1 may carry trailing extensions (ignored);
+       SSLv3 ends here — trailing bytes in an SSLv3
+       ServerHello are refused. */
+    if (leg_version == 0x0302) {
+        if (spos + 2 <= sh_len) {
+            u32 ext_total = tget16(sh + spos);
+            if (spos + 2 + ext_total != sh_len) return -1;
+        } else if (spos != sh_len) return -1;
+    } else if (spos != sh_len) return -1;
+    if (transcript_append(msg, msg_len) != 0) return -1;
+    /* Certificate: same parse/verify/TOFU machinery as TLS
+       1.2. SHA-1 certificates are admitted only because this
+       handshake runs with tls_allow_sha1_certs set. */
+    mtype = leg_next_hs(msg, 8192, &msg_len);
+    if (mtype != 11) { return -1; }
+    const u8 *cm = msg + 4;
+    u32 cm_len = msg_len - 4;
+    if (cm_len < 3) return -1;
+    u32 total_certs_len = tget24(cm);
+    if (total_certs_len + 3 > cm_len) return -1;
+    struct cert_info certs[4];
+    int cert_count = 0;
+    const u8 *leaf_der = 0;
+    u32 leaf_der_len = 0;
+    u32 cpos = 3;
+    while (cpos < 3 + total_certs_len) {
+        if (cpos + 3 > cm_len) return -2;
+        u32 clen = tget24(cm + cpos);
+        if (cpos + 3 + clen > cm_len) return -2;
+        if (cert_count >= 4) return -2; /* chain too long */
+        if (parse_cert(cm + cpos + 3, clen, &certs[cert_count]) != 0) return -2;
+        if (cert_count == 0) { leaf_der = cm + cpos + 3; leaf_der_len = clen; }
+        cert_count++;
+        cpos += 3 + clen;
+    }
+    if (cert_count == 0) return -2;
+    if (verify_chain(certs, cert_count, host) != 0) { return -2; }
+    if (tls_verify_mode == 0) {
+        if (tofu_print_check_and_store(host, leaf_der, leaf_der_len) != 0) { return -2; }
+    }
+    tls_leaf_mod = certs[0].modulus;
+    tls_leaf_exp = certs[0].exponent;
+    tls_leaf_key_type = certs[0].key_type;
+    if (certs[0].key_type != 0) return -2; /* RSA key exchange needs an RSA leaf */
+    if (transcript_append(msg, msg_len) != 0) return -1;
+    /* ServerHelloDone (no ServerKeyExchange: RSA key exchange
+       has none). */
+    mtype = leg_next_hs(msg, 8192, &msg_len);
+    if (mtype != 14) { return -1; }
+    if (transcript_append(msg, msg_len) != 0) return -1;
+    /* ClientKeyExchange: versioned premaster, RSA-encrypted
+       with the leaf key (same PKCS#1 v1.5 shape as TLS 1.2;
+       the version bytes match the negotiated version). */
+    u8 premaster[48];
+    premaster[0] = 0x03; premaster[1] = (u8)(leg_version & 0xFF);
+    csprng_generate(premaster + 2, 46);
+    {
+        int bl = bn_bitlen(&tls_leaf_mod);
+        u32 k = (u32)((bl + 7) / 8);
+        if (k < 48 + 11 || k > 256) return -1;
+        u8 em[256];
+        em[0] = 0x00; em[1] = 0x02;
+        for (u32 i = 2; i < k - 48 - 1; i++) {
+            u8 r;
+            do { csprng_generate(&r, 1); } while (r == 0);
+            em[i] = r;
+        }
+        em[k - 48 - 1] = 0x00;
+        memcpy(em + k - 48, premaster, 48);
+        bn_t em_bn, ct_bn;
+        if (bn_from_be(&em_bn, em, k) != 0) return -1;
+        if (bn_modexp(&ct_bn, &em_bn, tls_leaf_exp, &tls_leaf_mod) != 0) return -1;
+        u8 ct[256];
+        if (bn_to_be(&ct_bn, ct, k) != 0) return -1;
+        u8 ckx[512];
+        tput16(ckx, (u16)k);
+        memcpy(ckx + 2, ct, k);
+        if (leg_send_hs(16, ckx, k + 2) != 0) { return -1; }
+    }
+    /* Master secret + key block. */
+    u8 seed_ms[64];
+    memcpy(seed_ms, tls_client_random, 32);
+    memcpy(seed_ms + 32, tls_server_random, 32);
+    u8 key_block[104];
+    if (leg_version == 0x0302) {
+        tls11_prf(premaster, 48, "master secret", seed_ms, 64, tls_master, 48);
+        u8 seed_ke[64];
+        memcpy(seed_ke, tls_server_random, 32);
+        memcpy(seed_ke + 32, tls_client_random, 32);
+        tls11_prf(tls_master, 48, "key expansion", seed_ke, 64, key_block, 72);
+        memcpy(leg_client_mac, key_block, 20);
+        memcpy(leg_server_mac, key_block + 20, 20);
+        memcpy(leg_client_key, key_block + 40, 16);
+        memcpy(leg_server_key, key_block + 56, 16);
+    } else {
+        ssl3_master(premaster, tls_client_random, tls_server_random, tls_master);
+        u8 seed_ke[64];
+        memcpy(seed_ke, tls_server_random, 32);
+        memcpy(seed_ke + 32, tls_client_random, 32);
+        ssl3_key_block(tls_master, tls_server_random, tls_client_random, key_block, 104);
+        memcpy(leg_client_mac, key_block, 20);
+        memcpy(leg_server_mac, key_block + 20, 20);
+        memcpy(leg_client_key, key_block + 40, 16);
+        memcpy(leg_server_key, key_block + 56, 16);
+        memcpy(leg_client_iv, key_block + 72, 16);
+        memcpy(leg_server_iv, key_block + 88, 16);
+    }
+    aes128_expand(leg_client_key, leg_client_rk);
+    aes128_expand(leg_server_key, leg_server_rk);
+    /* ChangeCipherSpec, then Finished. */
+    {
+        u8 ccs = 0x01;
+        if (leg_send_record(20, &ccs, 1) != 0) return -1;
+    }
+    leg_client_enc = 1;
+    {
+        u8 verify[36];
+        u32 vlen;
+        if (leg_version == 0x0302) {
+            /* Finished = PRF(master, label, MD5(transcript) ||
+               SHA1(transcript))[:12], over the transcript that
+               does NOT yet include this Finished. */
+            u8 hash[36];
+            md5_compute(tls_transcript, tls_transcript_len, hash);
+            sha1_compute(tls_transcript, tls_transcript_len, hash + 16);
+            tls11_prf(tls_master, 48, "client finished", hash, 36, verify, 12);
+            vlen = 12;
+        } else {
+            ssl3_finished(tls_master, tls_transcript, tls_transcript_len, 1, verify);
+            vlen = 36;
+        }
+        if (leg_send_hs(20, verify, vlen) != 0) return -1;
+    }
+    /* Server CCS + Finished. */
+    {
+        u32 rec_len = 0;
+        int rt = leg_recv_record(&rec_len);
+        if (rt != 20 || rec_len != 1 || leg_rec_buf[0] != 0x01) return -1;
+    }
+    leg_server_enc = 1;
+    mtype = leg_next_hs(msg, 8192, &msg_len);
+    if (mtype != 20) { return -1; }
+    {
+        /* Verify server Finished over the transcript that
+           includes our Finished but not yet theirs. */
+        u8 expect[36];
+        u32 vlen;
+        if (leg_version == 0x0302) {
+            u8 hash[36];
+            md5_compute(tls_transcript, tls_transcript_len, hash);
+            sha1_compute(tls_transcript, tls_transcript_len, hash + 16);
+            tls11_prf(tls_master, 48, "server finished", hash, 36, expect, 12);
+            vlen = 12;
+        } else {
+            ssl3_finished(tls_master, tls_transcript, tls_transcript_len, 0, expect);
+            vlen = 36;
+        }
+        if (msg_len != 4 + vlen) return -1;
+        if (memcmp(msg + 4, expect, vlen) != 0) return -1;
+    }
+    tls_negotiated_version = (leg_version == 0x0302) ? 3 : 4;
+    return 0;
+}
+
+/* Legacy app data (same spill shape as tls_recv_app). */
+static int leg_send_app(const u8 *data, u32 len) {
+    return leg_send_record(23, data, len);
+}
+
+static int leg_recv_app(u8 *buf, u32 max) {
+    if (leg_app_spill_pos < leg_app_spill_len) {
+        u32 avail = leg_app_spill_len - leg_app_spill_pos;
+        u32 n = avail < max ? avail : max;
+        memcpy(buf, leg_app_spill + leg_app_spill_pos, n);
+        leg_app_spill_pos += n;
+        if (leg_app_spill_pos == leg_app_spill_len) {
+            leg_app_spill_len = 0; leg_app_spill_pos = 0;
+        }
+        return (int)n;
+    }
+    u32 rec_len = 0;
+    int rt = leg_recv_record(&rec_len);
+    if (rt < 0) return -1;
+    if (rt == 21) return -1; /* alert: treat as close/error */
+    if (rt != 23) return -1;
+    if (rec_len > max) {
+        memcpy(buf, leg_rec_buf, max);
+        memcpy(leg_app_spill, leg_rec_buf + max, rec_len - max);
+        leg_app_spill_len = rec_len - max;
+        leg_app_spill_pos = 0;
+        return (int)max;
+    }
+    memcpy(buf, leg_rec_buf, rec_len);
+    return (int)rec_len;
+}
+
+/* SSLv2-Hello probe (legacy Phase 3): sends an SSLv2-format
+   ClientHello and classifies the reply WITHOUT establishing
+   any session. Returns 0 (classification printed) or -1 on
+   connect/IO failure. */
+int net_sslprobe(const char *host, u16 port) {
+    ip_t hip;
+    if (!net_parse_ip(host, &hip)) {
+        if (net_dns_lookup(host, &hip) != 0) return -1;
+    }
+    if (net_tcp_connect(hip, port) != 0) return -1;
+    /* SSLv2 ClientHello: 2-byte header (0x80 | length), type
+       0x01, version 0x0200, cipher_spec_length, session_id_length
+       (0), challenge_length (16), one 3-byte cipher spec, 16-byte
+       challenge. 30 bytes on the wire. */
+    u8 hello[32];
+    u32 pos = 0;
+    hello[pos++] = 0x80; hello[pos++] = 28; /* length after header */
+    hello[pos++] = 0x01; /* CLIENT_HELLO */
+    hello[pos++] = 0x02; hello[pos++] = 0x00; /* version 0x0200 */
+    hello[pos++] = 0x00; hello[pos++] = 0x03; /* cipher_spec_length */
+    hello[pos++] = 0x00; hello[pos++] = 0x00; /* session_id_length */
+    hello[pos++] = 0x00; hello[pos++] = 0x10; /* challenge_length */
+    hello[pos++] = 0x07; hello[pos++] = 0x00; hello[pos++] = 0xC0; /* 3DES */
+    csprng_generate(hello + pos, 16); pos += 16;
+    if (net_tcp_send(hello, pos) != 0) { net_tcp_close(); return -1; }
+    /* Read the reply's first bytes (5 s budget). net_tcp_recv
+       returns 0 on timeout/closed, < 0 on error. */
+    u8 first[5];
+    u32 got = 0;
+    u32 start = timer_ticks;
+    while (got < 2 && timer_ticks - start < 500) {
+        int n = net_tcp_recv(first + got, 2 - got, 100);
+        if (n < 0) { net_tcp_close(); return -1; }
+        if (n > 0) got += (u32)n;
+    }
+    if (got < 2) {
+        console_write("sslprobe: no reply (timeout or closed)\n");
+        net_tcp_close();
+        return 0;
+    }
+    if (first[0] & 0x80) {
+        /* 2-byte SSLv2 header: the next byte is the message
+           type (0x04 = SERVER_HELLO). */
+        u8 mt = 0;
+        int got_mt = 0;
+        u32 start2 = timer_ticks;
+        while (timer_ticks - start2 < 500) {
+            int n = net_tcp_recv(&mt, 1, 100);
+            if (n < 0) break;
+            if (n > 0) { got_mt = 1; break; }
+        }
+        if (!got_mt) console_write("sslprobe: no reply (closed during reply)\n");
+        else if (mt == 0x04) console_write("sslprobe: SSLv2 SERVER_HELLO (server speaks SSLv2)\n");
+        else console_printf("sslprobe: SSLv2 message type %x\n", mt);
+    } else if (first[0] == 0x00) {
+        /* 3-byte SSLv2 header (long messages): one more
+           length byte, then the message type. */
+        u8 tail[2];
+        u32 got2 = 0;
+        u32 start2 = timer_ticks;
+        while (got2 < 2 && timer_ticks - start2 < 500) {
+            int n = net_tcp_recv(tail + got2, 2 - got2, 100);
+            if (n < 0) break;
+            if (n > 0) got2 += (u32)n;
+        }
+        if (got2 < 2) console_write("sslprobe: no reply (closed during reply)\n");
+        else if (tail[1] == 0x04) console_write("sslprobe: SSLv2 SERVER_HELLO (server speaks SSLv2)\n");
+        else console_printf("sslprobe: SSLv2 message type %x\n", tail[1]);
+    } else if (first[0] == 0x16) {
+        /* TLS record: read the rest of the header, then the
+           handshake header + ServerHello version. */
+        u8 rest[9];
+        u32 got2 = 0;
+        u32 start3 = timer_ticks;
+        while (got2 < 9 && timer_ticks - start3 < 500) {
+            int n = net_tcp_recv(rest + got2, 9 - got2, 100);
+            if (n < 0) break;
+            if (n > 0) got2 += (u32)n;
+        }
+        if (got2 >= 9 && rest[3] == 2) {
+            console_printf("sslprobe: TLS ServerHello version %u.%u\n", rest[7], rest[8]);
+        } else {
+            console_write("sslprobe: TLS record (short or non-ServerHello reply)\n");
+        }
+    } else if (first[0] == 0x15) {
+        console_write("sslprobe: TLS alert\n");
+    } else {
+        console_printf("sslprobe: unknown reply %x\n", first[0]);
+    }
+    net_tcp_close();
+    return 0;
+}
+
+static int tls_handshake(const char *host, int legacy) {
     tls_hs_len = 0;
     tls_transcript_len = 0;
     tls13_transcript_len = 0;
@@ -2485,25 +3300,35 @@ static int tls_handshake(const char *host) {
     tls13_fail_stage = 0;
     tls_negotiated_version = 0;
     tls_sh_ks_present = 0;
-    if (tls_send_combined_hello(host) != 0) return -1;
-    int is13 = 0;
-    if (tls_read_server_hello(&is13) != 0) return -1;
+    /* SHA-1 certificates are admitted ONLY for a legacy
+       handshake; cleared on every exit below, so a modern
+       handshake never sees this flag set. */
+    tls_allow_sha1_certs = legacy;
     int rc;
-    if (is13) {
-        rc = tls13_handshake_rest(host);
-        if (rc == 0) tls_negotiated_version = 2;
-        else console_printf("tls13: handshake failed at stage %d\n",
-                            tls13_fail_stage);
+    if (legacy) {
+        rc = leg_handshake(host);
     } else {
-        rc = tls12_handshake_rest(host);
-        if (rc == 0) tls_negotiated_version = 1;
+        if (tls_send_combined_hello(host) != 0) { tls_allow_sha1_certs = 0; return -1; }
+        int is13 = 0;
+        if (tls_read_server_hello(&is13) != 0) { tls_allow_sha1_certs = 0; return -1; }
+        if (is13) {
+            rc = tls13_handshake_rest(host);
+            if (rc == 0) tls_negotiated_version = 2;
+            else console_printf("tls13: handshake failed at stage %d\n",
+                                tls13_fail_stage);
+        } else {
+            rc = tls12_handshake_rest(host);
+            if (rc == 0) tls_negotiated_version = 1;
+        }
     }
+    tls_allow_sha1_certs = 0;
     return rc;
 }
 
 /* ---------- App data + HTTPS ---------- */
 static int tls_send_app(const u8 *data, u32 len) {
     if (tls_negotiated_version == 2) return tls13_send_record(23, data, len);
+    if (tls_negotiated_version == 3 || tls_negotiated_version == 4) return leg_send_app(data, len);
     return tls_send_record(23, data, len);
 }
 /* App-data spill: a server may send a record larger than the
@@ -2515,6 +3340,7 @@ static int tls_send_app(const u8 *data, u32 len) {
 /* Returns bytes read, 0 on timeout slice, -1 on close/error. */
 static int tls_recv_app(u8 *buf, u32 max) {
     if (tls_negotiated_version == 2) return tls13_recv_app(buf, max);
+    if (tls_negotiated_version == 3 || tls_negotiated_version == 4) return leg_recv_app(buf, max);
     if (tls_app_spill_pos < tls_app_spill_len) {
         u32 avail = tls_app_spill_len - tls_app_spill_pos;
         u32 n = avail < max ? avail : max;
@@ -2540,22 +3366,37 @@ static int tls_recv_app(u8 *buf, u32 max) {
     memcpy(buf, tls_rec_buf, rec_len);
     return (int)rec_len;
 }
-static int https_get_inner(const char *host, u16 port, const char *path, char *buf, u32 max) {
+static int https_get_core(const char *host, u16 port, const char *path, char *buf, u32 max,
+                          const char *cookie_hdr, int store_cookies,
+                          int *status_out, char *loc_out, u32 loc_max) {
+    /* Consume the single-use legacy flag FIRST, even if this
+       call then fails fast: a stale flag must never survive
+       into a later connection. */
+    int legacy = tls_legacy_once;
+    tls_legacy_once = 0;
     if (max < 2) return -1;
     ip_t hip;
     if (!net_parse_ip(host, &hip)) {
         if (net_dns_lookup(host, &hip) != 0) return -1;
     }
     if (net_tcp_connect(hip, port) != 0) return -1;
-    int hs = tls_handshake(host);
+    int hs = tls_handshake(host, legacy);
     if (hs != 0) { net_tcp_close(); return hs; }
-    char req[512];
+    char req[1024];
     int ri = 0;
     const char *p;
     p = "GET "; while (*p) req[ri++] = *p++;
     p = path; while (*p && ri < 400) req[ri++] = *p++;
     p = " HTTP/1.0\r\nHost: "; while (*p) req[ri++] = *p++;
     p = host; while (*p && ri < 480) req[ri++] = *p++;
+    /* Phase 4 headers: fixed headers always fit (ri <= 484).
+       The Cookie header is sent whole or not at all, with
+       room left for the final CRLFCRLF + NUL. */
+    p = "\r\nUser-Agent: nxtsOS\r\nAccept: */*\r\nConnection: close"; while (*p) req[ri++] = *p++;
+    if (cookie_hdr && cookie_hdr[0] && ri + (int)strlen(cookie_hdr) + 14 < 1024) {
+        p = "\r\nCookie: "; while (*p) req[ri++] = *p++;
+        p = cookie_hdr; while (*p) req[ri++] = *p++;
+    }
     p = "\r\n\r\n"; while (*p) req[ri++] = *p++;
     req[ri] = 0;
     if (tls_send_app((const u8 *)req, (u32)ri) != 0) { net_tcp_close(); return -1; }
@@ -2605,11 +3446,6 @@ static int https_get_inner(const char *host, u16 port, const char *path, char *b
                         break;
                     }
                 }
-                for (u32 i = 0; i + 17 < header_end; i++) {
-                    if (memcmp(buf + i, "Transfer-Encoding:", 18) == 0) {
-                        net_tcp_close(); return -1;
-                    }
-                }
             }
         }
         if (header_end && content_len != 0xFFFFFFFFu && seen >= header_end + content_len) break;
@@ -2623,10 +3459,52 @@ static int https_get_inner(const char *host, u16 port, const char *path, char *b
     }
     net_tcp_close();
     if (!header_end) return -1;
-    u32 body_len = total - header_end;
-    memmove(buf, buf + header_end, body_len);
-    buf[body_len] = 0;
+    /* Phase 4 response parsing (shared with the plain core):
+       status, authoritative Content-Length (conflicting
+       duplicates refused), chunked handling, Location, and
+       Set-Cookie storage. The in-loop scan above stays as the
+       early-completion heuristic only. */
+    if (header_end > HTTP_MAX_HEADER) return -1;
+    int status = http_parse_status(buf, header_end);
+    if (status < 0) return -1;
+    u32 clen;
+    if (http_content_length(buf, header_end, &clen) != 0) return -1;
+    int chunked = http_is_chunked(buf, header_end);
+    if (chunked < 0) return -1;
+    if (chunked && clen != 0xFFFFFFFFu) return -1;
+    if (loc_out && loc_max) {
+        if (http_header_value(buf, header_end, "Location", loc_out, loc_max) != 0)
+            loc_out[0] = 0;
+    }
+    if (store_cookies) http_store_all_cookies(buf, header_end, host, path, 1);
+    u32 body_len;
+    if (chunked) {
+        if (http_chunked_decode(buf, header_end, total, net_fetch_truncated(), &body_len) != 0)
+            return -1;
+    } else if (clen != 0xFFFFFFFFu) {
+        u32 avail = total > header_end ? total - header_end : 0;
+        body_len = avail < clen ? avail : clen;
+        memmove(buf, buf + header_end, body_len);
+        buf[body_len] = 0;
+    } else {
+        body_len = total > header_end ? total - header_end : 0;
+        memmove(buf, buf + header_end, body_len);
+        buf[body_len] = 0;
+    }
+    if (status_out) *status_out = status;
     return (int)body_len;
+}
+static int https_get_inner(const char *host, u16 port, const char *path, char *buf, u32 max) {
+    /* Unchanged contract: exactly one request, no redirects,
+       no cookie jar (the repo path depends on this). */
+    return https_get_core(host, port, path, buf, max, 0, 0, 0, 0, 0);
+}
+int https_get_single(int mode, const char *host, u16 port, const char *path, char *buf, u32 max,
+                     const char *cookie_hdr, int store_cookies,
+                     int *status_out, char *loc_out, u32 loc_max) {
+    tls_verify_mode = mode;
+    return https_get_core(host, port, path, buf, max, cookie_hdr, store_cookies,
+                          status_out, loc_out, loc_max);
 }
 int net_https_get(const char *host, u16 port, const char *path, char *buf, u32 max) {
     tls_verify_mode = 0;
