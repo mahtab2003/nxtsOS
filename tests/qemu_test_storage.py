@@ -84,7 +84,7 @@ log = log_text()
 print("--- serial log ---")
 print(log)
 print("--- marker check ---")
-for m in ["Filesystem mounted", "Hello from nxtsFS", "Wrote persist.txt",
+for m in ["Filesystem mounted", "Filesystem: nxtsFS v1", "Wrote persist.txt",
           "hello-persist", "persist.txt"]:
     found = m in log
     print(f"{'FOUND' if found else 'MISSING'}: {m}")

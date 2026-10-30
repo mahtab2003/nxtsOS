@@ -199,6 +199,26 @@ void console_write(const char *s) {
     while (*s) console_putchar(*s++);
 }
 
+void console_set_cursor(u32 row, u32 col) {
+    if (row >= ROWS) row = ROWS - 1;
+    if (col >= COLS) col = COLS - 1;
+    cursor_row = (u16)row;
+    cursor_col = (u16)col;
+}
+void console_put_at(u32 row, u32 col, char ch) {
+    if (row >= ROWS || col >= COLS) return;
+    text_buf[row][col] = ch;
+}
+void console_present(void) {
+    if (fb_mode) {
+        if (!fb_suppressed) render_fb();
+    } else {
+        render_vga();
+    }
+}
+u32 console_rows(void) { return ROWS; }
+u32 console_cols(void) { return COLS; }
+
 /* Minimal printf: %s %d %u %x %c %% */
 void console_printf(const char *fmt, ...) {
     __builtin_va_list ap;

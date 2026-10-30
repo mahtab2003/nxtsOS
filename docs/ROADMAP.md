@@ -463,14 +463,14 @@ with test + security reports exists in `releases/`.
   device in sandbox); improvement is argued from pixel
   counts, not a phone fps number.
 
-Current release: **v1.1.4 = accumulation release over v1.1.3:
-web/SSL Phase 3 (TLS 1.1/SSLv3 client, SSLv2-Hello probe,
-SHA-1 gating, opt-in-only legacy) + Phase 4 (HTTP layer:
-redirects, cookies, chunked decoding, header handling) —
-the full fetch-side web stack, with downgrade protection
-holding both ways**. Next: **tampered-CertificateVerify
-negative test, further desktop apps per user say-so, and
-user-side retests**, per the post-release plan (a due
+Current release: **v1.1.5 = accumulation release over v1.1.4:
+core CLI completion — hardware/resources control, shutdown
+with real ACPI poweroff, user/group management, nano-like
+editor, firewall, system date; flat shell names kept as
+aliases**. Next: **core remains (group-enforced permissions,
+date set, editor undo, >32 KiB editor files, top job control,
+proxy/server) + a Linux-terminal parity audit, per the user's
+post-release core direction**, per the post-release plan (a due
 release must ship on its own as soon as work is
 release-worthy — never deferred behind audit/polish
 chunks, never waiting for the user to ask).

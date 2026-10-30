@@ -7,6 +7,7 @@
    drops; stack drops are counted here in stack_drops. */
 #include "net.h"
 #include "http.h"
+#include "fw.h"
 #include "../drivers/pit.h"
 
 static ip_t our_ip, netmask_ip, gateway_ip, dns_ip;
@@ -122,6 +123,19 @@ int net_arp_resolve(ip_t ip, mac_t *out) {
    use broadcast or the eth layer directly, not this. */
 int net_ip_send(ip_t dst, u8 proto, const u8 *payload, u32 payload_len) {
     if (payload_len > 1400) return -1;
+    /* Firewall (core CLI): outbound check before the packet
+       is built (and before ARP, so a denied packet never
+       even resolves). Ports at +0/+2 of the L4 segment for
+       TCP/UDP, else 0. */
+    {
+        ip_t src_ip; net_ip_addr(&src_ip);
+        u16 sport = 0, dport = 0;
+        if ((proto == 6 || proto == 17) && payload_len >= 4) {
+            sport = (u16)(((u16)payload[0] << 8) | payload[1]);
+            dport = (u16)(((u16)payload[2] << 8) | payload[3]);
+        }
+        if (!fw_check(1, proto, src_ip, sport, dst, dport)) return -1;
+    }
     mac_t dst_mac;
     int is_bcast = (dst.b[0]==255 && dst.b[1]==255 && dst.b[2]==255 && dst.b[3]==255);
     ip_t next_hop = dst;
@@ -289,6 +303,19 @@ void net_rx_frame(const u8 *frame, u32 len) {
         }
     }
     u8 proto = payload[9];
+    /* Firewall (core CLI): after src/dst/proto parsed and dst
+       validated, before any dispatch. L4 ports only for
+       TCP/UDP with a present header, else 0. A deny drops
+       the packet (and bumps the fw counter); ARP never
+       reaches this hook. */
+    {
+        u16 sport = 0, dport = 0;
+        if ((proto == 6 || proto == 17) && total >= ihl + 4) {
+            sport = get16(payload + ihl);
+            dport = get16(payload + ihl + 2);
+        }
+        if (!fw_check(0, proto, src, sport, dst, dport)) { stack_drops++; return; }
+    }
     if (proto == 1) icmp_rx(payload, total, src);
     else if (proto == 17) udp_rx(payload, total, src);
     else if (proto == 6) tcp_rx(payload, total, src);

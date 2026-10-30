@@ -8,6 +8,55 @@
 > contemporary notes, and no test result is claimed here beyond what
 > those reports record. Entries 0.1.0–0.2.0 are the original notes.
 
+## 1.1.5 — Accumulation release: core CLI completion (hardware/resources, shutdown, users/groups, editor, firewall)
+
+- Hardware control + resources via the terminal: `diag cpu/pci/disk`
+  (CPU identity/features, PCI device scan, disk geometry), `system
+  uptime/sysinfo`, `proc ps/top` (live ~1 s monitor, `q` quits),
+  plus `mem`/`ticks`. See docs/CORE_CLI.md.
+- Shutdown/power: `system shutdown` / `poweroff` / `halt`,
+  root-only, `Shutdown? (y/n)` confirmation unless `--force`,
+  real ACPI poweroff via parsed RSDP→RSDT→FADT→DSDT `_S5_`
+  (no hardcoded SLP_TYP; absent/malformed tables = "ACPI
+  poweroff unavailable" + halt, never a fake poweroff), plus
+  permanent `diag acpi`. `reboot` deliberately unchanged
+  (no confirm/gate — the storage harness depends on it).
+- User/group management, completed: `useradd/userdel`
+  (MAX_USERS 8, CSPRNG salts, `fails.txt` record dropped on
+  delete), `groupadd/groupdel/groupmod/groups/id`,
+  `fs chown/stat` (chown root-enforced in the fs layer too).
+  Passwords echo-off, prompted twice, buffers cleared, never
+  logged, salted-hash only.
+- Nano-like editor: `fs edit` — full-screen, arrows/Home/End/
+  PgUp/PgDn, insert/Backspace/Del, ^O save/save-as (mode +
+  ownership preserved), ^X with unsaved-change prompt, ^W
+  search (wrap once), ^K cut (1024 B cap) / ^U paste, ^G help;
+  32 KiB cap.
+- Firewall: `fw` family — in/out × allow/deny × proto × IP ×
+  port/range, ordered first-match, default policy, drop
+  counter, `fw.txt` persistence (root-owned 0600, lazy load,
+  malformed lines skipped), hooks in both net paths, with
+  proof denied traffic is actually dropped and rules
+  surviving a reboot. One real kernel bug found and fixed
+  by the malformed-file test: `fw_split` capped at 7 words
+  instead of rejecting 8-word lines (now returns -1 on
+  overflow).
+- Gaps closed: `system date` wired to the CMOS RTC
+  (YYYY-MM-DD HH:MM:SS). FLAT-NAME DECISION (final):
+  flat shell names are KEPT as aliases — grouped dispatch
+  already exists, ~40 harnesses invoke flat names, and no
+  explicit user order to remove them exists.
+- Security pass: adversarial coverage of the new surfaces
+  (editor input handling, firewall parsing/persistence,
+  user/group privilege escalation attempts, ACPI table
+  parsing) — see `releases/v1.1.5/SECURITY_REPORT.md`.
+  Full regression on the release ISO — see
+  `releases/v1.1.5/TEST_REPORT.md`.
+- Remains (not in this release): group-enforced file
+  permissions (needs an on-disk nxtsFS format change +
+  migration); `date set`; editor undo; editor files over
+  32 KiB; top job control; HTTP proxy/server.
+
 ## 1.1.4 — Accumulation release: web/SSL Phases 3–4 (legacy protocols + HTTP layer)
 
 - Web/SSL Phase 3: TLS 1.1 + SSLv3 client (single suite

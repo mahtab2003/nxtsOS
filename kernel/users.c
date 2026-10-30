@@ -200,6 +200,104 @@ static void buf_put_hex8(char *buf, u32 *pos, u32 v) {
     for (int sh = 28; sh >= 0; sh -= 4) buf_putc(buf, pos, hexd[(v >> sh) & 0xFu]);
 }
 
+int users_valid_name(const char *name) {
+    if (!name || name[0] == 0) return 0;
+    if (strcmp(name, "root") == 0) return 0;
+    u32 len = 0;
+    while (name[len]) {
+        if (len >= 31) return 0;
+        unsigned char c = (unsigned char)name[len];
+        if (c < 33 || c > 126 || c == ':') return 0;
+        len++;
+    }
+    return len > 0;
+}
+
+int users_uid(const char *name, u32 *uid_out) {
+    if (!name || !uid_out) return -1;
+    if (strcmp(name, "root") == 0) { *uid_out = 0; return 0; }
+    for (int i = 0; i < user_count; i++)
+        if (strcmp(users[i].name, name) == 0) { *uid_out = users[i].uid; return 0; }
+    return -1;
+}
+
+/* Rewrite users.txt from the loaded table plus one pending record
+   (for add) or minus one record (for delete, skip < 0). Shared by
+   users_add/users_delete so the two paths cannot drift apart: the
+   buffer, the 0600 root-owned write, and the reload+verify
+   discipline are identical to users_change_password. */
+static int users_rewrite(const struct user_rec *extra, int skip) {
+    u32 pos = 0;
+    passwd_overflow = 0;
+    for (int i = 0; i < user_count; i++) {
+        if (i == skip) continue;
+        buf_puts(passwd_file_buf, &pos, users[i].name);
+        buf_putc(passwd_file_buf, &pos, ':');
+        buf_put_u32(passwd_file_buf, &pos, users[i].uid);
+        buf_putc(passwd_file_buf, &pos, ':');
+        buf_puts(passwd_file_buf, &pos, users[i].salt);
+        buf_putc(passwd_file_buf, &pos, ':');
+        buf_put_hex8(passwd_file_buf, &pos, users[i].hash);
+        buf_putc(passwd_file_buf, &pos, '\n');
+    }
+    if (extra) {
+        buf_puts(passwd_file_buf, &pos, extra->name);
+        buf_putc(passwd_file_buf, &pos, ':');
+        buf_put_u32(passwd_file_buf, &pos, extra->uid);
+        buf_putc(passwd_file_buf, &pos, ':');
+        buf_puts(passwd_file_buf, &pos, extra->salt);
+        buf_putc(passwd_file_buf, &pos, ':');
+        buf_put_hex8(passwd_file_buf, &pos, extra->hash);
+        buf_putc(passwd_file_buf, &pos, '\n');
+    }
+    if (passwd_overflow) return -1;
+    if (fs_write_as("users.txt", (const u8 *)passwd_file_buf, pos, 0, 0600) != 0)
+        return -1;
+    return 0;
+}
+
+int users_add(const char *name, const char *password) {
+    if (!users_valid_name(name) || !password || password[0] == 0) return -1;
+    if (!fs_mounted()) return -1;
+    /* Refresh from disk when a file exists (a previous add in this
+       session already reloaded, but never trust a stale table for
+       a duplicate/cap decision). No file means setup mode: the
+       table starts empty and this add creates the file. */
+    if (fs_exists("users.txt")) users_load();
+    else user_count = 0;
+    if (users_exists(name)) return -1;
+    if (user_count >= MAX_USERS) return -1;
+    u32 uid = 1000;
+    for (int i = 0; i < user_count; i++)
+        if (users[i].uid >= uid) uid = users[i].uid + 1;
+    if (uid > 100000) return -1; /* users_load would skip it on reload */
+    struct user_rec rec;
+    memset(&rec, 0, sizeof(rec));
+    u32 nl = 0;
+    while (name[nl] && nl < 31) { rec.name[nl] = name[nl]; nl++; }
+    rec.uid = uid;
+    gen_salt(rec.salt, uid);
+    rec.hash = users_hash(rec.salt, password);
+    if (users_rewrite(&rec, -1) != 0) return -1;
+    if (users_load() <= 0) return -1;
+    u32 check_uid = 0;
+    if (!users_check(name, password, &check_uid) || check_uid != uid) return -1;
+    return 0;
+}
+
+int users_delete(const char *name) {
+    if (!name || !fs_mounted()) return -1;
+    users_load();
+    int idx = -1;
+    for (int i = 0; i < user_count; i++)
+        if (strcmp(users[i].name, name) == 0) { idx = i; break; }
+    if (idx < 0) return -1;
+    if (users_rewrite(0, idx) != 0) return -1;
+    users_load();
+    if (users_exists(name)) return -1;
+    return 0;
+}
+
 int users_change_password(const char *name, const char *new_password) {
     if (!name || !new_password || new_password[0] == 0) return -1;
     if (!fs_mounted()) return -1;

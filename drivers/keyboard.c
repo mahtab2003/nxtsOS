@@ -26,6 +26,12 @@ static const char shifted[128] = {
 static volatile int buf[BUF_SIZE];
 static volatile u32 head = 0, tail = 0;
 static volatile int shift = 0, extended = 0;
+/* Ctrl tracking (editor ^keys): either Ctrl sets it, either
+   release clears it. A two-Ctrl chord edge (left held, right
+   pressed, left released) clears the flag while right is still
+   held — harmless for an editor, where Ctrl is a momentary
+   modifier, not a held state. */
+static volatile int ctrl = 0;
 /* v0.7.3 diagnostics: bytes drained from the controller at startup
    (lodged GRUB/BIOS bytes that would otherwise block all input),
    and the last raw scancode received. */
@@ -75,7 +81,7 @@ static u32 drain_output(void) {
    controller that does not answer a command can never make
    booting worse than v0.7.2 was. */
 void keyboard_init(void) {
-    head = 0; tail = 0; shift = 0; extended = 0;
+    head = 0; tail = 0; shift = 0; extended = 0; ctrl = 0;
     init_drained = 0; last_sc = 0;
     if (wait_in_empty() == 0) outb(0x64, 0xAD); /* disable kbd port */
     if (wait_in_empty() == 0) outb(0x64, 0xA7); /* disable aux port */
@@ -143,23 +149,48 @@ static void keyboard_feed(u8 sc) {
     csprng_stir(sample, sizeof(sample));
     last_sc = sc;
     if (sc == 0xE0) { extended = 1; return; }
-    /* Extended keys: only PgUp/PgDn are delivered (as special codes
-       for terminal scrollback); arrows and the rest stay ignored,
-       and release codes (0xC9/0xD1) match neither make code. */
+    /* Extended keys: PgUp/PgDn (terminal scrollback) plus the
+       editor keys — arrows, Home/End, Delete. Release codes
+       (0xC8/0xD0/0xCB/0xCD/0xC7/0xCF/0xD3) match no make code
+       below, so arrow releases never move the cursor. E0
+       right-Ctrl make/release sets/clears the Ctrl flag. */
     if (extended) {
         extended = 0;
         if (sc == 0x49) push_char(KEY_PGUP);
         else if (sc == 0x51) push_char(KEY_PGDN);
+        else if (sc == 0x48) push_char(KEY_UP);
+        else if (sc == 0x50) push_char(KEY_DOWN);
+        else if (sc == 0x4B) push_char(KEY_LEFT);
+        else if (sc == 0x4D) push_char(KEY_RIGHT);
+        else if (sc == 0x47) push_char(KEY_HOME);
+        else if (sc == 0x4F) push_char(KEY_END);
+        else if (sc == 0x53) push_char(KEY_DEL);
+        else if (sc == 0x1D) ctrl = 1;
+        else if (sc == 0x9D) ctrl = 0;
         return;
     }
     if (sc == 0x2A || sc == 0x36) { shift = 1; return; }
     if (sc == 0xAA || sc == 0xB6) { shift = 0; return; }
+    /* Ctrl make/release must be checked before the generic
+       release ignore below (0x9D has the release bit set). */
+    if (sc == 0x1D) { ctrl = 1; return; }
+    if (sc == 0x9D) { ctrl = 0; return; }
     if (sc & 0x80) return; /* key release */
     if (sc == 0x0E) { push_char('\b'); return; }
     if (sc == 0x1C) { push_char('\n'); return; }
     if (sc < 128) {
         char c = shift ? shifted[sc] : normal[sc];
-        if (c) push_char(c);
+        if (c) {
+            /* Ctrl+letter delivers the control code (a->1 ...
+               z->26), so the editor sees ^O/^X/^W/^K/^U/^G.
+               Other Ctrl combinations deliver the plain char
+               (Ctrl+Backspace/Enter are handled above). */
+            if (ctrl) {
+                if (c >= 'a' && c <= 'z') { push_char(c - 'a' + 1); return; }
+                if (c >= 'A' && c <= 'Z') { push_char(c - 'A' + 1); return; }
+            }
+            push_char(c);
+        }
     }
 }
 

@@ -2,6 +2,7 @@
 #include "console.h"
 #include "shell.h"
 #include "users.h"
+#include "groups.h"
 #include "proc.h"
 #include "pkg.h"
 #include "sha256.h"
@@ -9,6 +10,10 @@
 #include "csprng.h"
 #include "wm.h"
 #include "fb.h"
+#include "hwinfo.h"
+#include "acpi.h"
+#include "editor.h"
+#include "../drivers/ata.h"
 #include "../drivers/mouse.h"
 #include "../mm/pmm.h"
 #include "../drivers/pit.h"
@@ -16,6 +21,7 @@
 #include "../fs/vfs.h"
 #include "../net/net.h"
 #include "../net/http.h"
+#include "../net/fw.h"
 
 static char session_name[32];
 static u32 session_uid = 0;
@@ -129,6 +135,23 @@ static void fails_clear(const char *name) {
         }
     }
 }
+/* Drop a user's failed-login record entirely (shell `userdel`):
+   without this, a deleted name that is later re-added would
+   inherit the old lockout count. Unlike fails_clear (which
+   zeroes the count and keeps the line), this removes the entry
+   so the file carries no stale record for a deleted account.
+   Silently does nothing for an unknown name. */
+static void fails_drop(const char *name) {
+    fails_load();
+    for (int i = 0; i < fail_count; i++) {
+        if (strcmp(fails[i].name, name) == 0) {
+            for (int j = i; j + 1 < fail_count; j++) fails[j] = fails[j + 1];
+            fail_count--;
+            fails_save();
+            return;
+        }
+    }
+}
 /* Unlock primitive shared by the shell `unlock` command and the
    desktop Settings Unlock row. It deliberately performs NO uid
    check: the shell command checks root first, and the desktop
@@ -171,6 +194,11 @@ static int read_line(char *buf, u32 max, int echo) {
         } else if (c >= 0x100) {
             /* Special key (PgUp/PgDn): ignored here, never appended
                (a (char) truncation would store a NUL/control byte). */
+        } else if (c < 32) {
+            /* Control code (Ctrl+letter, now delivered by the
+               keyboard driver for the editor): ignored here, so
+               Ctrl keys can never pollute a login, password, or
+               command-line buffer. \n and \b are handled above. */
         } else if (len < max - 1) {
             buf[len++] = (char)c;
             if (echo) console_putchar((char)c);
@@ -244,6 +272,62 @@ static void cmd_mem(void) {
                    pmm_total_frames(), pmm_total_frames() * 4,
                    pmm_free_frames(), pmm_free_frames() * 4,
                    pmm_used_frames(), pmm_used_frames() * 4);
+}
+
+/* Ticks (100 Hz) to whole seconds, by repeated subtraction: the
+   freestanding kernel links no libgcc, so no division helper is
+   assumed even for a constant divisor. */
+static u32 ticks_to_seconds(u32 ticks) {
+    u32 s = 0;
+    while (ticks >= 100) { ticks -= 100; s++; }
+    return s;
+}
+
+/* Split seconds into d/h/m/s, also by repeated subtraction. */
+static void split_uptime(u32 secs, u32 *d, u32 *h, u32 *m, u32 *s) {
+    *d = 0; while (secs >= 86400) { secs -= 86400; (*d)++; }
+    *h = 0; while (secs >= 3600) { secs -= 3600; (*h)++; }
+    *m = 0; while (secs >= 60) { secs -= 60; (*m)++; }
+    *s = secs;
+}
+
+/* PCI row printer for hw_pci_scan (core CLI family (a)). */
+static void pci_print_row(u8 dev, u8 func, u16 vendor, u16 device,
+                          u8 class_code, u8 subclass, u8 prog_if, u32 bar0) {
+    console_printf("  %u:%u  %x:%x  class %x/%x/%x  BAR0 0x%x\n",
+                   (u32)dev, (u32)func, (u32)vendor, (u32)device,
+                   (u32)class_code, (u32)subclass, (u32)prog_if, bar0);
+}
+
+/* CPU feature-flag printer: one space-separated name per set bit,
+   EDX then ECX of CPUID leaf 1, plus NX from the extended leaf.
+   The console wraps at 80 columns, so one logical line is fine. */
+static void cpu_print_flags(u32 ecx, u32 edx, int nx) {
+    static const char *edx_names[32] = {
+        "FPU", "VME", "DE", "PSE", "TSC", "MSR", "PAE", "MCE",
+        "CX8", "APIC", 0, "SEP", "MTRR", "PGE", "MCA", "CMOV",
+        "PAT", "PSE36", 0, "CLFSH", 0, 0, 0, "MMX",
+        "FXSR", "SSE", "SSE2", 0, "HTT", 0, 0, 0
+    };
+    static const char *ecx_names[32] = {
+        "SSE3", "PCLMULQDQ", 0, 0, 0, 0, 0, 0,
+        0, "SSSE3", 0, 0, "FMA", "CX16", 0, 0,
+        0, 0, 0, "SSE4.1", "SSE4.2", 0, "MOVBE", "POPCNT",
+        0, "AES", "XSAVE", 0, "AVX", "F16C", "RDRAND", 0
+    };
+    console_write("Features:");
+    for (int b = 0; b < 32; b++) {
+        if ((edx & (1u << b)) && edx_names[b]) {
+            console_putchar(' '); console_write(edx_names[b]);
+        }
+    }
+    for (int b = 0; b < 32; b++) {
+        if ((ecx & (1u << b)) && ecx_names[b]) {
+            console_putchar(' '); console_write(ecx_names[b]);
+        }
+    }
+    if (nx) console_write(" NX");
+    console_putchar('\n');
 }
 
 static int tokenize(char *line, char *tok[], char **rest) {
@@ -337,13 +421,26 @@ static const struct help_entry help_table[] = {
     {"ver", "system", "ver", "Print the nxtsOS version (same literal build.sh checks)."},
     {"mem", "system", "mem", "Show physical memory frames: total, free, used."},
     {"ticks", "system", "ticks", "Show timer ticks and uptime in seconds (100 Hz)."},
+    {"uptime", "system", "uptime", "Show uptime as days, hours, minutes, seconds, plus background job count."},
+    {"date", "system", "date", "Show the wall-clock date and time from the CMOS RTC (YYYY-MM-DD HH:MM:SS, year = 2000 + RTC year register). Setting the clock is not supported in this run."},
+    {"sysinfo", "system", "sysinfo", "One-screen system summary: version, CPU, memory, disk, network, jobs, session."},
     {"clear", "system", "clear", "Clear the text console."},
     {"echo", "system", "echo <text>", "Print text to the console."},
     {"reboot", "system", "reboot", "Reboot immediately via the keyboard controller (no confirm, no uid check)."},
+    {"shutdown", "system", "shutdown [--force]", "Root only: power off via ACPI (asks y/n unless --force). Refuses cleanly when ACPI poweroff is unavailable."},
+    {"poweroff", "system", "poweroff [--force]", "Alias for shutdown."},
+    {"halt", "system", "halt [--force]", "Root only: stop the CPU (asks y/n unless --force). The VM stays present but halted."},
     {"whoami", "session", "whoami", "Print the current session user and uid."},
     {"lock", "session", "lock", "Lock the session; unlock with the session password (unavailable in setup mode)."},
     {"unlock", "session", "unlock <user>", "Root only: clear a user's failed-login lockout."},
     {"passwd", "session", "passwd [user]", "Change a password (root: any user; others: own only, current password required)."},
+    {"useradd", "session", "useradd <user>", "Root only: create a user (prompts for a password, echo off). Creates users.txt if none exists; after that, logins use the file."},
+    {"userdel", "session", "userdel <user>", "Root only: delete a user (never root, never the session user). Drops the user's failed-login record."},
+    {"groupadd", "session", "groupadd <group>", "Root only: create a group (gid auto-assigned from 1000). Creates groups.txt if none exists."},
+    {"groupdel", "session", "groupdel <group>", "Root only: delete a group."},
+    {"groupmod", "session", "groupmod <group> add|remove <user>", "Root only: add or remove a user from a group."},
+    {"groups", "session", "groups [user]", "List the groups a user belongs to (default: session user)."},
+    {"id", "session", "id [user]", "Print uid and groups for a user (default: session user)."},
     {"logout", "session", "logout", "Kill the session's background jobs and return to the login prompt."},
     {"idle", "session", "idle [minutes 0-480|off]", "Show or set the idle session-lock timeout for this session (0 = never)."},
     {"fs", "fs", "fs", "Show filesystem status (mounted, files, space)."},
@@ -354,9 +451,14 @@ static const struct help_entry help_table[] = {
     {"mv", "fs", "mv <old> <new>", "Rename a file."},
     {"cp", "fs", "cp <src> <dst>", "Copy a file."},
     {"chmod", "fs", "chmod <file> <mode>", "Set a file mode (octal, 3 digits, e.g. 600 or 0644)."},
+    {"chown", "fs", "chown <file> <user>", "Root only: change a file's owner (metadata only; mode, size, data untouched)."},
+    {"stat", "fs", "stat <file>", "Show a file's size, owner, mode, and sector count (root, owner, or any reader)."},
+    {"edit", "fs", "edit <file>", "Full-screen text editor (nano-like: ^O save, ^X exit, ^W search, ^K cut, ^U paste, ^G help)."},
     {"run", "proc", "run <file>", "Run an ELF program in the foreground."},
     {"runbg", "proc", "runbg <file>", "Start an ELF program as a background job."},
     {"jobs", "proc", "jobs", "List background jobs as a list view (header, rows, footer count)."},
+    {"ps", "proc", "ps", "Show the session plus background jobs (pid, name, uid)."},
+    {"top", "proc", "top", "Live resource monitor (uptime, memory, disk, network, jobs); press q to quit."},
     {"kill", "proc", "kill <pid>", "Kill a background job by pid (own jobs, or any as root)."},
     {"pkg", "pkg", "pkg <subcommand>", "Package manager (see 'help pkg' for subcommands)."},
     {"pkg list", "pkg", "pkg list", "List installed packages (header, rows, footer count)."},
@@ -388,11 +490,25 @@ static const struct help_entry help_table[] = {
     {"tofprints", "net", "tofprints list|clear <host>", "Root only: list or clear pinned TOFU leaf fingerprints."},
     {"tofprints list", "net", "tofprints list", "Root only: list pinned TOFU leaf fingerprints."},
     {"tofprints clear", "net", "tofprints clear <host>", "Root only: clear the pinned fingerprint for one host."},
+    {"fw", "net", "fw status|enable|disable|default allow|deny|list|add <in|out> <allow|deny> <any|icmp|tcp|udp> <src> <sport> <dst> <dport>|del <n>|clear|stat", "Firewall: ordered rules (first match wins, else default policy) over IPv4 headers only; state persists in fw.txt (root-owned 0600). With default deny, allow DHCP (UDP 67/68), DNS (UDP 53) and ICMP explicitly or the machine loses network. Outbound deny rules also block repo/castore fetches."},
+    {"fw status", "net", "fw status", "Show firewall state: enabled/disabled, default policy, rule count, drop count."},
+    {"fw enable", "net", "fw enable", "Root only: turn packet filtering on (rules + default policy apply)."},
+    {"fw disable", "net", "fw disable", "Root only: turn packet filtering off (all traffic passes, rules kept)."},
+    {"fw default", "net", "fw default allow|deny", "Root only: set the policy for packets no rule matches."},
+    {"fw list", "net", "fw list", "List firewall rules in match order (1-based, as used by fw del)."},
+    {"fw add", "net", "fw add <in|out> <allow|deny> <any|icmp|tcp|udp> <src> <sport> <dst> <dport>", "Root only: add a rule (src/dst are 'any' or a dotted IP; ports are 'any', a single port, or a lo-hi range). Every field is validated; a bad field adds nothing."},
+    {"fw del", "net", "fw del <n>", "Root only: delete rule number n from fw list (1-based)."},
+    {"fw clear", "net", "fw clear", "Root only: delete all rules (enabled/default policy kept)."},
+    {"fw stat", "net", "fw stat", "Show the firewall drop count (packets denied, headers only, never contents)."},
     {"sha256", "crypto", "sha256 <file>", "Print the SHA-256 hex digest of a file (up to 64 KiB)."},
     {"fbinfo", "diag", "fbinfo", "Show framebuffer geometry or why none is available."},
     {"kbdstat", "diag", "kbdstat", "Show PS/2 controller status, startup-drained bytes, last scancode."},
     {"mouse", "diag", "mouse", "Show pointer presence, position, and button state."},
     {"mousepoll", "diag", "mousepoll", "Poll the PS/2 controller for 5 seconds, logging any bytes."},
+    {"cpu", "diag", "cpu", "Show CPU vendor, brand, family/model/stepping, and feature flags (CPUID)."},
+    {"pci", "diag", "pci", "List PCI bus 0 devices: vendor, device, class, BAR0."},
+    {"acpi", "diag", "acpi", "Show parsed ACPI poweroff state (PM1 blocks, SLP_TYP) or the failure stage."},
+    {"disk", "diag", "disk", "Show ATA disk presence and filesystem total/free space."},
     {"gui", "gui", "gui", "Enter the classic window manager (Back to shell returns)."},
     {"desktop", "gui", "desktop", "Enter the desktop (icons, launcher, taskbar, workspaces)."},
     {"wmautotest", "test", "wmautotest", "Run the window-manager autotest (edge cases, limits)."},
@@ -689,10 +805,50 @@ static int execute(char *line) {
     } else if (strcmp(tok[0], "ver") == 0) {
         /* Version literal, kept in sync by build.sh's VERSION check
            (same grep as the main.c banner and the wm.c About text). */
-        console_write("nxtsOS v1.1.4\n");
+        console_write("nxtsOS v1.1.5\n");
     } else if (strcmp(tok[0], "reboot") == 0) {
         console_write("Rebooting...\n");
         outb(0x64, 0xFE);
+        for (;;) __asm__ volatile ("hlt");
+    } else if (strcmp(tok[0], "shutdown") == 0 || strcmp(tok[0], "poweroff") == 0) {
+        /* Root only, confirmed unless --force. Any other
+           argument is a usage error, never silently ignored.
+           ACPI poweroff is parsed, never assumed: when the
+           tables are absent or malformed the machine halts
+           with a message instead of pretending to power off.
+           Writes are synchronous in nxtsFS, so there is no
+           flush step to perform first. */
+        if (session_uid != 0) { console_write("shutdown: root only\n"); return 0; }
+        int force = 0;
+        if (n >= 2) {
+            if (strcmp(tok[1], "--force") == 0) force = 1;
+            else { console_write("Usage: shutdown [--force]\n"); return 0; }
+        }
+        if (!force) {
+            console_write("Shutdown? (y/n) ");
+            char ans[8];
+            read_line(ans, sizeof(ans), 1);
+            if (strcmp(ans, "y") != 0) { console_write("shutdown: aborted\n"); return 0; }
+        }
+        console_write("Powering off...\n");
+        if (acpi_poweroff() != 0) {
+            console_write("shutdown: ACPI poweroff unavailable, system halted.\n");
+            for (;;) __asm__ volatile ("hlt");
+        }
+    } else if (strcmp(tok[0], "halt") == 0) {
+        if (session_uid != 0) { console_write("halt: root only\n"); return 0; }
+        int force = 0;
+        if (n >= 2) {
+            if (strcmp(tok[1], "--force") == 0) force = 1;
+            else { console_write("Usage: halt [--force]\n"); return 0; }
+        }
+        if (!force) {
+            console_write("Halt? (y/n) ");
+            char ans[8];
+            read_line(ans, sizeof(ans), 1);
+            if (strcmp(ans, "y") != 0) { console_write("halt: aborted\n"); return 0; }
+        }
+        console_write("System halted.\n");
         for (;;) __asm__ volatile ("hlt");
     } else if (strcmp(tok[0], "whoami") == 0) {
         console_printf("%s uid %u\n", session_name, session_uid);
@@ -762,6 +918,144 @@ static int execute(char *line) {
         memset(npw, 0, sizeof(npw));
         console_printf("Password changed for %s\n", target);
         audit("passwd", target);
+        return 0;
+    } else if (strcmp(tok[0], "useradd") == 0) {
+        /* Root only, one name, nothing else: a password on the
+           command line would be echoed to the serial log, so the
+           password is always prompted with echo off (like
+           passwd), twice, and the buffers are cleared on every
+           return. The assigned uid is resolved after success for
+           the confirmation line. */
+        if (session_uid != 0) { console_write("useradd: root only\n"); return 0; }
+        if (n < 2 || (rest && rest[0])) { console_write("Usage: useradd <user>\n"); return 0; }
+        const char *name = tok[1];
+        if (!fs_mounted()) { console_write("useradd: no filesystem mounted\n"); return 0; }
+        if (!users_valid_name(name)) { console_printf("useradd: bad name %s\n", name); return 0; }
+        if (users_exists(name)) { console_printf("useradd: user %s already exists\n", name); return 0; }
+        if (users_count() >= MAX_USERS) { console_write("useradd: user limit reached (8)\n"); return 0; }
+        console_write("New password: ");
+        char npw[64];
+        read_line(npw, sizeof(npw), 0);
+        if (npw[0] == 0) {
+            memset(npw, 0, sizeof(npw));
+            console_write("useradd: empty password not allowed\n"); return 0;
+        }
+        console_write("Retype new password: ");
+        char rpw[64];
+        read_line(rpw, sizeof(rpw), 0);
+        if (strcmp(npw, rpw) != 0) {
+            memset(npw, 0, sizeof(npw)); memset(rpw, 0, sizeof(rpw));
+            console_write("useradd: passwords do not match\n"); return 0;
+        }
+        memset(rpw, 0, sizeof(rpw));
+        if (users_add(name, npw) != 0) {
+            memset(npw, 0, sizeof(npw));
+            console_printf("useradd: cannot add user %s\n", name); return 0;
+        }
+        memset(npw, 0, sizeof(npw));
+        u32 uid = 0;
+        users_uid(name, &uid);
+        console_printf("Added user %s (uid %u)\n", name, uid);
+        audit("useradd", name);
+        return 0;
+    } else if (strcmp(tok[0], "userdel") == 0) {
+        if (session_uid != 0) { console_write("userdel: root only\n"); return 0; }
+        if (n < 2 || (rest && rest[0])) { console_write("Usage: userdel <user>\n"); return 0; }
+        const char *name = tok[1];
+        if (strcmp(name, "root") == 0) { console_write("userdel: cannot delete root\n"); return 0; }
+        if (strcmp(name, session_name) == 0) { console_write("userdel: cannot delete the session user\n"); return 0; }
+        if (!users_exists(name)) { console_printf("userdel: no such user %s\n", name); return 0; }
+        if (users_delete(name) != 0) {
+            console_printf("userdel: cannot delete user %s\n", name); return 0;
+        }
+        fails_drop(name);
+        console_printf("Deleted user %s\n", name);
+        audit("userdel", name);
+        return 0;
+    } else if (strcmp(tok[0], "groupadd") == 0) {
+        if (session_uid != 0) { console_write("groupadd: root only\n"); return 0; }
+        if (n < 2 || (rest && rest[0])) { console_write("Usage: groupadd <group>\n"); return 0; }
+        const char *name = tok[1];
+        if (!fs_mounted()) { console_write("groupadd: no filesystem mounted\n"); return 0; }
+        if (!users_valid_name(name)) { console_printf("groupadd: bad name %s\n", name); return 0; }
+        if (groups_exists(name)) { console_printf("groupadd: group %s already exists\n", name); return 0; }
+        if (groups_count() >= MAX_GROUPS) { console_write("groupadd: group limit reached (8)\n"); return 0; }
+        int gid = groups_add(name);
+        if (gid < 0) { console_printf("groupadd: cannot add group %s\n", name); return 0; }
+        console_printf("Added group %s (gid %u)\n", name, (u32)gid);
+        audit("groupadd", name);
+        return 0;
+    } else if (strcmp(tok[0], "groupdel") == 0) {
+        if (session_uid != 0) { console_write("groupdel: root only\n"); return 0; }
+        if (n < 2 || (rest && rest[0])) { console_write("Usage: groupdel <group>\n"); return 0; }
+        const char *name = tok[1];
+        if (!groups_exists(name)) { console_printf("groupdel: no such group %s\n", name); return 0; }
+        if (groups_delete(name) != 0) {
+            console_printf("groupdel: cannot delete group %s\n", name); return 0;
+        }
+        console_printf("Deleted group %s\n", name);
+        audit("groupdel", name);
+        return 0;
+    } else if (strcmp(tok[0], "groupmod") == 0) {
+        /* tokenize() stops at 2 tokens: the group is tok[1] and
+           rest holds "add|remove <user>" (see chmod). */
+        if (session_uid != 0) { console_write("groupmod: root only\n"); return 0; }
+        if (n < 2 || !rest || !rest[0]) { console_write("Usage: groupmod <group> add|remove <user>\n"); return 0; }
+        char *op = rest;
+        char *sp = op;
+        while (*sp && *sp != ' ') sp++;
+        if (*sp == 0) { console_write("Usage: groupmod <group> add|remove <user>\n"); return 0; }
+        *sp = 0; sp++;
+        while (*sp == ' ') sp++;
+        char *user = sp;
+        if (*user == 0) { console_write("Usage: groupmod <group> add|remove <user>\n"); return 0; }
+        while (*sp && *sp != ' ') sp++;
+        if (*sp) { while (*sp == ' ') sp++; if (*sp) { console_write("Usage: groupmod <group> add|remove <user>\n"); return 0; } }
+        if (strcmp(op, "add") != 0 && strcmp(op, "remove") != 0) {
+            console_write("Usage: groupmod <group> add|remove <user>\n"); return 0;
+        }
+        const char *group = tok[1];
+        if (!groups_exists(group)) { console_printf("groupmod: no such group %s\n", group); return 0; }
+        if (!users_exists(user) && strcmp(user, "root") != 0) {
+            console_printf("groupmod: no such user %s\n", user); return 0;
+        }
+        int r = (strcmp(op, "add") == 0) ? groups_mod_add(group, user)
+                                         : groups_mod_remove(group, user);
+        if (r == 1) {
+            if (strcmp(op, "add") == 0) console_printf("groupmod: %s is already a member of %s\n", user, group);
+            else console_printf("groupmod: %s is not a member of %s\n", user, group);
+            return 0;
+        }
+        if (r == -2) { console_printf("groupmod: group %s is full\n", group); return 0; }
+        if (r != 0) { console_printf("groupmod: cannot %s %s %s %s\n", op, user, (strcmp(op, "add") == 0) ? "to" : "from", group); return 0; }
+        if (strcmp(op, "add") == 0) console_printf("Added %s to %s\n", user, group);
+        else console_printf("Removed %s from %s\n", user, group);
+        audit("groupmod", group);
+        return 0;
+    } else if (strcmp(tok[0], "groups") == 0) {
+        if (n >= 2 && rest && rest[0]) { console_write("Usage: groups [user]\n"); return 0; }
+        const char *user = (n >= 2) ? tok[1] : session_name;
+        if (!users_exists(user) && strcmp(user, "root") != 0) {
+            console_printf("groups: no such user %s\n", user); return 0;
+        }
+        char list[256];
+        int c = groups_names_for_user(user, list, sizeof(list));
+        if (c < 0) { console_printf("groups: cannot list groups for %s\n", user); return 0; }
+        if (c == 0) console_printf("%s: none\n", user);
+        else console_printf("%s: %s\n", user, list);
+        return 0;
+    } else if (strcmp(tok[0], "id") == 0) {
+        if (n >= 2 && rest && rest[0]) { console_write("Usage: id [user]\n"); return 0; }
+        const char *user = (n >= 2) ? tok[1] : session_name;
+        u32 uid = 0;
+        if (users_uid(user, &uid) != 0) {
+            console_printf("id: no such user %s\n", user); return 0;
+        }
+        char list[256];
+        int c = groups_names_for_user(user, list, sizeof(list));
+        if (c < 0) { console_printf("id: cannot list groups for %s\n", user); return 0; }
+        if (c == 0) console_printf("uid=%u groups=none\n", uid);
+        else console_printf("uid=%u groups=%s\n", uid, list);
         return 0;
     } else if (strcmp(tok[0], "fs") == 0) {
         fs_status();
@@ -877,6 +1171,46 @@ static int execute(char *line) {
             return 0;
         }
         console_printf("chmod: %s mode %s\n", tok[1], ms);
+    } else if (strcmp(tok[0], "chown") == 0) {
+        /* Root only, enforced here AND in fs_chown_as. The file
+           is tok[1], the user is the first word of rest (same
+           tokenize rule as chmod); anything after it is a usage
+           error, never silently ignored. */
+        if (session_uid != 0) { console_write("chown: root only\n"); return 0; }
+        if (n < 2 || !rest || !rest[0]) { console_write("Usage: chown <file> <user>\n"); return 0; }
+        char *user = rest;
+        char *p = user;
+        while (*p && *p != ' ') p++;
+        if (*p) { *p = 0; p++; while (*p == ' ') p++; if (*p) { console_write("Usage: chown <file> <user>\n"); return 0; } }
+        u32 uid = 0;
+        if (users_uid(user, &uid) != 0) { console_printf("chown: no such user %s\n", user); return 0; }
+        if (fs_chown_as(tok[1], uid, session_uid) != 0) {
+            console_printf("chown: cannot chown %s\n", tok[1]);
+            return 0;
+        }
+        console_printf("chown: %s owner %s\n", tok[1], user);
+    } else if (strcmp(tok[0], "stat") == 0) {
+        /* Metadata read: root, owner, or any reader (the fs
+           layer enforces the rule; missing and unreadable both
+           report the same refusal, so stat is not an existence
+           oracle for files the caller may not read). */
+        if (n < 2 || (rest && rest[0])) { console_write("Usage: stat <file>\n"); return 0; }
+        if (!fs_mounted()) { console_write("No filesystem mounted\n"); return 0; }
+        struct fs_stat st;
+        if (fs_stat_as(tok[1], &st, session_uid) != 0) {
+            console_printf("stat: cannot stat %s\n", tok[1]);
+            return 0;
+        }
+        console_printf("%s: %u bytes, uid %u (%s), mode %u, %u sectors\n",
+                       tok[1], st.size, st.uid, users_name_for_uid(st.uid),
+                       st.mode, st.sectors);
+    } else if (strcmp(tok[0], "edit") == 0) {
+        /* Full-screen editor. The editor prints its own
+           refusals ("edit: ...") and "edit: done" on exit; the
+           shell adds nothing, so the serial log stays a clean
+           record of the session. */
+        if (n < 2 || (rest && rest[0])) { console_write("Usage: edit <file>\n"); return 0; }
+        editor_open(tok[1], session_uid);
     } else if (strcmp(tok[0], "run") == 0) {
         if (n < 2) { console_write("Usage: run <file>\n"); return 0; }
         if (proc_exec_file(tok[1], session_uid) != 0) {
@@ -1295,6 +1629,123 @@ static int execute(char *line) {
         } else {
             console_write("Usage: tofprints list|clear <host>\n");
         }
+    } else if (strcmp(tok[0], "fw") == 0) {
+        /* Firewall (core CLI family (e)): subcommand in tok[1],
+           arguments in rest. Mutations are root-gated here in
+           the handler; status/list/stat are world-readable.
+           Rules persist in fw.txt (root-owned 0600) on every
+           mutation; a failed save is reported, not hidden,
+           while the in-memory rule stays live. */
+        if (n < 2) {
+            console_write("Usage: fw status|enable|disable|default allow|deny|list|add <in|out> <allow|deny> <any|icmp|tcp|udp> <src> <sport> <dst> <dport>|del <n>|clear|stat\n");
+            return 0;
+        }
+        if (strcmp(tok[1], "status") == 0) {
+            console_printf("fw: %s, default %s, %d rules, %u drops\n",
+                fw_enabled() ? "enabled" : "disabled",
+                fw_default_deny() ? "deny" : "allow",
+                fw_rule_count(), fw_drop_count());
+        } else if (strcmp(tok[1], "list") == 0) {
+            int c = fw_rule_count();
+            if (c == 0) {
+                console_write("fw: no rules\n");
+            } else {
+                for (int i = 0; i < c; i++) {
+                    char line[128];
+                    fw_rule_to_str(fw_rule_at(i), line, sizeof(line));
+                    console_printf("%d: %s\n", i + 1, line);
+                }
+            }
+        } else if (strcmp(tok[1], "stat") == 0) {
+            console_printf("fw: %u drops\n", fw_drop_count());
+        } else if (strcmp(tok[1], "enable") == 0) {
+            if (session_uid != 0) { console_write("fw: root only\n"); return 0; }
+            fw_set_enabled(1);
+            console_write(fw_save() == 0 ? "fw: enabled\n" : "fw: enabled (save failed)\n");
+        } else if (strcmp(tok[1], "disable") == 0) {
+            if (session_uid != 0) { console_write("fw: root only\n"); return 0; }
+            fw_set_enabled(0);
+            console_write(fw_save() == 0 ? "fw: disabled\n" : "fw: disabled (save failed)\n");
+        } else if (strcmp(tok[1], "default") == 0) {
+            if (session_uid != 0) { console_write("fw: root only\n"); return 0; }
+            if (!rest || !rest[0]) { console_write("Usage: fw default allow|deny\n"); return 0; }
+            if (strcmp(rest, "allow") == 0) {
+                fw_set_default(0);
+                console_write(fw_save() == 0 ? "fw: default allow\n" : "fw: default allow (save failed)\n");
+            } else if (strcmp(rest, "deny") == 0) {
+                fw_set_default(1);
+                console_write(fw_save() == 0 ? "fw: default deny\n" : "fw: default deny (save failed)\n");
+            } else {
+                console_write("Usage: fw default allow|deny\n");
+            }
+        } else if (strcmp(tok[1], "add") == 0) {
+            if (session_uid != 0) { console_write("fw: root only\n"); return 0; }
+            /* rest holds the 7 rule words; split them here
+               (tokenize stops at 2 tokens). */
+            static char addbuf[128];
+            if (!rest || !rest[0]) {
+                console_write("Usage: fw add <in|out> <allow|deny> <any|icmp|tcp|udp> <src> <sport> <dst> <dport>\n");
+                return 0;
+            }
+            u32 i = 0;
+            while (rest[i] && i < sizeof(addbuf) - 1) { addbuf[i] = rest[i]; i++; }
+            addbuf[i] = 0;
+            /* Rebuild a single-space line, then let the shared
+               rule parser validate every field: a bad field
+               means no rule is added at all. */
+            char *w[7];
+            int wc = 0;
+            char *p = addbuf;
+            while (*p && wc < 7) {
+                while (*p == ' ') p++;
+                if (!*p) break;
+                w[wc++] = p;
+                while (*p && *p != ' ') p++;
+                if (*p) *p++ = 0;
+            }
+            if (wc != 7 || *p) {
+                console_write("fw: bad rule\nUsage: fw add <in|out> <allow|deny> <any|icmp|tcp|udp> <src> <sport> <dst> <dport>\n");
+                return 0;
+            }
+            char line[128];
+            u32 o = 0;
+            for (int k = 0; k < 7; k++) {
+                if (k) line[o++] = ' ';
+                const char *s = w[k];
+                while (*s && o < sizeof(line) - 1) line[o++] = *s++;
+            }
+            line[o] = 0;
+            struct fw_rule r;
+            if (!fw_parse_rule_line(line, &r)) {
+                console_write("fw: bad rule\nUsage: fw add <in|out> <allow|deny> <any|icmp|tcp|udp> <src> <sport> <dst> <dport>\n");
+                return 0;
+            }
+            if (fw_add_rule(&r) != 0) {
+                console_write("fw: rule table full (16)\n");
+                return 0;
+            }
+            console_write(fw_save() == 0 ? "fw: rule added\n" : "fw: rule added (save failed)\n");
+        } else if (strcmp(tok[1], "del") == 0) {
+            if (session_uid != 0) { console_write("fw: root only\n"); return 0; }
+            if (!rest || !rest[0]) { console_write("Usage: fw del <n>\n"); return 0; }
+            u32 v = 0;
+            int ok = 1;
+            for (const char *p = rest; *p && *p != ' '; p++) {
+                if (*p < '0' || *p > '9') { ok = 0; break; }
+                v = v * 10u + (u32)(*p - '0');
+            }
+            if (!ok || v < 1 || fw_del_rule((int)v - 1) != 0) {
+                console_printf("fw: no such rule %s\n", rest);
+                return 0;
+            }
+            console_write(fw_save() == 0 ? "fw: rule deleted\n" : "fw: rule deleted (save failed)\n");
+        } else if (strcmp(tok[1], "clear") == 0) {
+            if (session_uid != 0) { console_write("fw: root only\n"); return 0; }
+            fw_clear_rules();
+            console_write(fw_save() == 0 ? "fw: rules cleared\n" : "fw: rules cleared (save failed)\n");
+        } else {
+            console_write("Usage: fw status|enable|disable|default allow|deny|list|add <in|out> <allow|deny> <any|icmp|tcp|udp> <src> <sport> <dst> <dport>|del <n>|clear|stat\n");
+        }
     } else if (strcmp(tok[0], "nettest") == 0) {
         console_write(net_test_run() == 0 ? "nettest PASS\n" : "nettest FAIL\n");
     } else if (strcmp(tok[0], "hostmatch") == 0) {
@@ -1403,6 +1854,129 @@ static int execute(char *line) {
             console_printf("kill: cannot kill %s (no such job or no permission)\n", tok[1]);
             return 0;
         }
+    } else if (strcmp(tok[0], "cpu") == 0) {
+        if (!hw_cpuid_supported()) { console_write("cpu: cpuid not available\n"); return 0; }
+        char vendor[13], brand[49];
+        hw_cpu_vendor(vendor);
+        hw_cpu_brand(brand);
+        u32 fam, model, step, ecx, edx;
+        hw_cpu_family_model(&fam, &model, &step);
+        hw_cpu_features(&ecx, &edx);
+        console_printf("CPU vendor: %s\n", vendor);
+        if (brand[0]) console_printf("CPU brand: %s\n", brand);
+        else console_write("CPU brand: (not reported)\n");
+        console_printf("CPU family %u model %u stepping %u\n", fam, model, step);
+        cpu_print_flags(ecx, edx, hw_cpu_nx());
+    } else if (strcmp(tok[0], "pci") == 0) {
+        console_write("PCI bus 0:\nDEV FUNC  VENDOR:DEVICE  CLASS  BAR0\n");
+        int n = hw_pci_scan(pci_print_row);
+        console_printf("(%d PCI device(s))\n", n);
+    } else if (strcmp(tok[0], "acpi") == 0) {
+        acpi_diag();
+    } else if (strcmp(tok[0], "disk") == 0) {
+        if (!ata_present()) { console_write("Disk: no ATA disk\n"); return 0; }
+        if (!fs_mounted()) { console_write("Disk: ATA device present, filesystem not mounted (no disk or bad filesystem)\n"); return 0; }
+        u32 total = fs_total_sectors(), free = fs_free_sectors();
+        /* 1 MiB = 2048 sectors: shifts, no division. */
+        console_printf("Disk: %u sectors total (%u MiB), %u sectors free (%u MiB)\n",
+                       total, total >> 11, free, free >> 11);
+    } else if (strcmp(tok[0], "uptime") == 0) {
+        u32 d, h, m, s;
+        split_uptime(ticks_to_seconds(timer_ticks), &d, &h, &m, &s);
+        console_printf("Uptime: %u day(s) %u:%u:%u (%u background job(s))\n",
+                       d, h, m, s, proc_bg_count());
+    } else if (strcmp(tok[0], "date") == 0) {
+        /* Wall clock from the CMOS RTC (hw_rtc_read handles
+           BCD/binary, 12/24-hour, and the update-in-progress
+           wait). World-readable, like uptime. The minimal
+           printf has no %02u, so fields are padded by hand. */
+        u32 year, mon, day, hour, min, sec;
+        if (hw_rtc_read(&year, &mon, &day, &hour, &min, &sec) != 0) {
+            console_write("date: RTC read failed\n");
+            return 0;
+        }
+        console_printf("%u-", year);
+        if (mon < 10) console_putchar('0');
+        console_printf("%u-", mon);
+        if (day < 10) console_putchar('0');
+        console_printf("%u ", day);
+        if (hour < 10) console_putchar('0');
+        console_printf("%u:", hour);
+        if (min < 10) console_putchar('0');
+        console_printf("%u:", min);
+        if (sec < 10) console_putchar('0');
+        console_printf("%u\n", sec);
+    } else if (strcmp(tok[0], "sysinfo") == 0) {
+        char vendor[13];
+        hw_cpu_vendor(vendor);
+        u32 d, h, m, s;
+        split_uptime(ticks_to_seconds(timer_ticks), &d, &h, &m, &s);
+        console_write("nxtsOS v1.1.5\n");
+        console_printf("CPU: %s\n", vendor[0] ? vendor : "(unknown)");
+        console_printf("Memory: %u frames total, %u free, %u used\n",
+                       pmm_total_frames(), pmm_free_frames(), pmm_used_frames());
+        if (fs_mounted())
+            console_printf("Disk: %u sectors total, %u free\n",
+                           fs_total_sectors(), fs_free_sectors());
+        else console_write("Disk: filesystem not mounted\n");
+        if (net_present()) {
+            mac_t mm; net_mac(&mm);
+            console_printf("Net: MAC %x:%x:%x:%x:%x:%x rx=%u tx=%u drops=%u\n",
+                           mm.b[0], mm.b[1], mm.b[2], mm.b[3], mm.b[4], mm.b[5],
+                           net_rx_count(), net_tx_count(), net_drop_count());
+            if (net_ip_configured()) {
+                ip_t a; net_ip_addr(&a);
+                console_printf("Net: ip=%u.%u.%u.%u\n", a.b[0], a.b[1], a.b[2], a.b[3]);
+            } else console_write("Net: no IP address (run dhcp)\n");
+        } else console_write("Net: no NIC\n");
+        console_printf("Jobs: %u background job(s); session: %s uid %u; uptime: %u day(s) %u:%u:%u\n",
+                       proc_bg_count(), session_name, session_uid, d, h, m, s);
+    } else if (strcmp(tok[0], "ps") == 0) {
+        console_printf("Session: %s uid %u\n", session_name, session_uid);
+        proc_bg_list();
+    } else if (strcmp(tok[0], "top") == 0) {
+        /* Live monitor: redraw about once a second, keep
+           background jobs ticking (as the shell idle loop does),
+           quit on 'q'. Other keys are ignored. On exit the
+           screen is cleared so the shell prompt returns clean. */
+        for (;;) {
+            console_clear();
+            u32 d, h, m, s;
+            split_uptime(ticks_to_seconds(timer_ticks), &d, &h, &m, &s);
+            console_printf("nxtsOS top - uptime %u day(s) %u:%u:%u - press q to quit\n",
+                           d, h, m, s);
+            console_printf("Memory: %u frames total, %u free, %u used\n",
+                           pmm_total_frames(), pmm_free_frames(), pmm_used_frames());
+            if (fs_mounted())
+                console_printf("Disk: %u sectors total, %u free\n",
+                               fs_total_sectors(), fs_free_sectors());
+            else console_write("Disk: filesystem not mounted\n");
+            if (net_present())
+                console_printf("Net: rx=%u tx=%u drops=%u\n",
+                               net_rx_count(), net_tx_count(), net_drop_count());
+            else console_write("Net: no NIC\n");
+            console_write("PID  NAME  UID\n");
+            char name[32]; u32 pid, uid;
+            int nj = 0;
+            for (int i = 0; proc_bg_at(i, name, &pid, &uid) == 0; i++) {
+                console_printf("pid %u  %s  uid %u\n", pid, name, uid);
+                nj++;
+            }
+            console_printf("(%d background job(s))\n", nj);
+            /* Wait ~100 ticks, polling keys and ticking jobs. */
+            u32 start = timer_ticks;
+            int quit = 0;
+            while (timer_ticks - start < 100) {
+                keyboard_poll();
+                int c = keyboard_getchar();
+                if (c == 'q') { quit = 1; break; }
+                proc_bg_tick();
+                __asm__ volatile ("hlt");
+            }
+            if (quit) break;
+        }
+        console_clear();
+        console_write("top: quit\n");
     } else {
         console_printf("Unknown command: %s (type help)\n", tok[0]);
     }

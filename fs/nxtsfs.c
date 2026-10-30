@@ -80,6 +80,8 @@ static int is_system_file(const char *name) {
         || strcmp(name, "repo.txt") == 0
         || strcmp(name, "repo_index.txt") == 0 || strcmp(name, "repo_index.sig") == 0
         || strcmp(name, "tlsanchors.txt") == 0
+        || strcmp(name, "groups.txt") == 0
+        || strcmp(name, "fw.txt") == 0
         || strcmp(name, "castore.txt") == 0 || strcmp(name, "tofuprints.txt") == 0)
         return 1;
     /* Rollback backups rb0..rb63 (Phase 11 snapshot): same rule —
@@ -397,12 +399,40 @@ int fs_rename_as(const char *oldname, const char *newname, u32 uid) {
     return 0;
 }
 
-/* Metadata-only mode change: only the mode changes; owner, size and
-   data sectors are untouched, so a chmod can never silently re-own
-   or truncate a file. Only root or the file's owner may change it —
-   a non-owner writer is refused even if the file is world-writable,
-   because changing who may read a file is not a write to its data.
-   A mode over 0777 is refused, never masked down. */
+/* Metadata-only owner change: only the uid changes; mode, size
+   and data sectors are untouched, so a chown can never silently
+   re-permit or truncate a file. ONLY root may change an owner —
+   enforced here in the fs layer as well as in the shell handler,
+   so a future caller cannot bypass the gate by calling this
+   directly. A non-existent file is refused, never created. */
+int fs_chown_as(const char *name, u32 new_uid, u32 caller_uid) {
+    if (!mounted || !valid_name(name)) return -1;
+    if (caller_uid != 0) return -1;
+    int idx = find_entry(name);
+    if (idx < 0) return -1;
+    struct dir_entry *e = &dir[idx];
+    e->uid = new_uid;
+    if (save_dir() != 0) return -1;
+    return 0;
+}
+
+/* Metadata read: size, owner, mode, sector count. Allowed iff
+   the caller is root, owns the file, or may read it — metadata
+   disclosure follows the read rule, so a user who cannot read
+   a file learns nothing about it from stat (missing and
+   unreadable both return -1). */
+int fs_stat_as(const char *name, struct fs_stat *out, u32 uid) {
+    if (!mounted || !valid_name(name) || !out) return -1;
+    int idx = find_entry(name);
+    if (idx < 0) return -1;
+    struct dir_entry *e = &dir[idx];
+    if (uid != 0 && e->uid != uid && !can_read_entry(e, uid)) return -1;
+    out->size = e->size;
+    out->uid = e->uid;
+    out->mode = e->mode;
+    out->sectors = e->sector_count;
+    return 0;
+}
 int fs_chmod_as(const char *name, u32 mode, u32 uid) {
     if (!mounted || !valid_name(name) || mode > 0777) return -1;
     int idx = find_entry(name);
