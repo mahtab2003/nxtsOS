@@ -1,5 +1,7 @@
 #include "common.h"
 #include "../drivers/serial.h"
+#include "spinlock.h"
+#include "smp.h"
 #include "fb.h"
 
 #define VGA_BASE ((volatile u16 *)0xB8000)
@@ -20,6 +22,71 @@ static char sb_lines[SB_LINES][COLS];
 static int sb_head = 0; /* next ring slot to write */
 static int sb_count = 0; /* lines stored, <= SB_LINES */
 static int sb_view = 0; /* lines back from live, 0 = live */
+
+/* Output capture (shell pipelines/redirection, parity run step 9):
+   while cap_active, console_putchar buffers instead of printing
+   to screen AND serial, so redirected output never leaks into
+   the serial log (a redirected secret must not land in the log).
+   The buffer is 4096 bytes; when it fills, the shell's flush
+   callback (registered by the shell before begin) drains it to
+   the capture file. The callback runs inside console_putchar,
+   so cap_flushing discards any print attempted during a flush
+   instead of recursing. All statics are file-scope, never on
+   the 16 KiB kernel stack. */
+#define CAP_BUF 4096
+static char cap_buf[CAP_BUF];
+static u32 cap_len = 0;
+static int cap_active = 0, cap_flushing = 0, cap_trunc = 0;
+static void (*cap_flush_cb)(void) = 0;
+
+/* Forward: console_putchar/write are defined below; the dmesg
+   printer needs them. */
+void console_putchar(char ch);
+void console_write(const char *s);
+/* dmesg ring: completed lines only, oldest first on print. */
+#define DMESG_LINES 64
+static char dmesg_lines[DMESG_LINES][81];
+static int dmesg_head = 0, dmesg_count = 0;
+static char dmesg_cur[81];
+static int dmesg_cur_len = 0;
+static int dmesg_suppress = 0;
+static void dmesg_push_line(void) {
+    int slot = dmesg_head;
+    int i = 0;
+    while (i < dmesg_cur_len && i < 80) { dmesg_lines[slot][i] = dmesg_cur[i]; i++; }
+    dmesg_lines[slot][i] = 0;
+    dmesg_head = (dmesg_head + 1) % DMESG_LINES;
+    if (dmesg_count < DMESG_LINES) dmesg_count++;
+    dmesg_cur_len = 0;
+}
+void console_dmesg_print(u32 max_lines) {
+    int n = dmesg_count;
+    if (max_lines > 0 && (int)max_lines < n) n = (int)max_lines;
+    int start = dmesg_head - dmesg_count + (dmesg_count - n);
+    dmesg_suppress = 1;
+    for (int k = 0; k < n; k++) {
+        int slot = (start + k) % DMESG_LINES;
+        if (slot < 0) slot += DMESG_LINES;
+        console_write(dmesg_lines[slot]);
+        console_putchar('\n');
+    }
+    dmesg_suppress = 0;
+}
+void console_dmesg_clear(void) {
+    dmesg_head = 0; dmesg_count = 0; dmesg_cur_len = 0;
+}
+
+void console_capture_set_flush(void (*cb)(void)) { cap_flush_cb = cb; }
+void console_capture_begin(void) { cap_len = 0; cap_active = 1; cap_trunc = 0; }
+u32 console_capture_take(char *out) {
+    u32 n = cap_len;
+    for (u32 i = 0; i < n; i++) out[i] = cap_buf[i];
+    cap_len = 0;
+    return n;
+}
+void console_capture_end(void) { cap_active = 0; }
+int console_capture_truncated(void) { return cap_trunc; }
+void console_capture_set_truncated(void) { cap_trunc = 1; }
 
 void console_set_fb_suppressed(int v) { fb_suppressed = v ? 1 : 0; }
 
@@ -151,8 +218,82 @@ void console_scroll_down(void) {
     }
 }
 
+/* SMP (redesign 4): console output is shared state (cursor,
+   text buffer, scrollback, dmesg ring), and two CPUs printing
+   at once would interleave characters and corrupt the cursor.
+   Every character goes through console_lock. The lock is
+   owner-recursive: the capture-flush callback runs INSIDE
+   console_putchar and may itself print (a filesystem warning
+   while draining), and a plain spinlock would deadlock on that
+   re-entry. The owner is the CPU index (smp_cpu_index); only
+   the owning CPU can re-enter, and only it can release. Panic
+   mode bypasses the lock entirely (see console_set_panic_mode):
+   a fault inside console_putchar itself must still reach the
+   screen instead of spinning on a lock its own CPU holds. */
+static spinlock_t console_lock = SPINLOCK_INIT;
+static int console_lock_owner = -1; /* -1 free, else CPU index */
+static u32 console_lock_depth = 0;
+static int console_panic_mode = 0;
+void console_set_panic_mode(void) { console_panic_mode = 1; }
+
+static void console_putchar_locked(char ch);
+
+/* Line-level locking: console_write/console_printf hold the lock
+   for their whole call, so one CPU's line can never interleave
+   character-by-character with another CPU's line (seen in SMP
+   testing: an AP "job finished" line garbled into a BSP "wait"
+   line). console_putchar alone still locks per character — a
+   user program's print syscall is a character stream, and only
+   the shell's own line calls need atomicity. The token is the
+   saved flags, except the two sentinels (never real EFLAGS):
+   PANIC (no lock taken) and NESTED (same-CPU re-entry). */
+#define CONSOLE_TOK_PANIC 0xFFFFFFFFu
+#define CONSOLE_TOK_NESTED 0xFFFFFFFEu
+static u32 console_line_begin(void) {
+    if (console_panic_mode) return CONSOLE_TOK_PANIC;
+    int cpu = smp_cpu_index();
+    if (console_lock_owner == cpu) { console_lock_depth++; return CONSOLE_TOK_NESTED; }
+    u32 f = spin_lock_irqsave(&console_lock);
+    console_lock_owner = cpu;
+    console_lock_depth = 1;
+    return f;
+}
+static void console_line_end(u32 tok) {
+    if (tok == CONSOLE_TOK_PANIC) return;
+    if (tok == CONSOLE_TOK_NESTED) { console_lock_depth--; return; }
+    console_lock_depth = 0;
+    console_lock_owner = -1; /* released before the lock word: a
+        spinner that sees the word free must see owner free too */
+    spin_unlock_irqrestore(&console_lock, tok);
+}
+
 void console_putchar(char ch) {
+    u32 tok = console_line_begin();
+    console_putchar_locked(ch);
+    console_line_end(tok);
+}
+
+static void console_putchar_locked(char ch) {
+    /* Capture branch FIRST, before the serial mirror: while a
+       pipeline stage or redirect is capturing, output goes to
+       the capture buffer only — never to screen or serial. */
+    if (cap_active) {
+        if (cap_flushing) return; /* print during a flush: drop, never recurse */
+        if (cap_len < CAP_BUF) { cap_buf[cap_len++] = ch; return; }
+        if (cap_flush_cb) {
+            cap_flushing = 1; cap_flush_cb(); cap_flushing = 0;
+            if (cap_len < CAP_BUF) { cap_buf[cap_len++] = ch; return; }
+        }
+        cap_trunc = 1; /* full and undrainable: drop, warn at end */
+        return;
+    }
     serial_putchar(ch);
+    /* dmesg ring: completed lines only, never captured output,
+       never dmesg's own printing. */
+    if (!dmesg_suppress) {
+        if (ch == '\n') dmesg_push_line();
+        else if (ch != '\r' && dmesg_cur_len < 80) dmesg_cur[dmesg_cur_len++] = ch;
+    }
     /* Any new output returns the view to live: history viewing ends
        the moment something prints. A full repaint follows below, so
        the stale history window cannot linger under new output. */
@@ -196,7 +337,9 @@ void console_putchar(char ch) {
 }
 
 void console_write(const char *s) {
+    u32 tok = console_line_begin();
     while (*s) console_putchar(*s++);
+    console_line_end(tok);
 }
 
 void console_set_cursor(u32 row, u32 col) {
@@ -205,6 +348,8 @@ void console_set_cursor(u32 row, u32 col) {
     cursor_row = (u16)row;
     cursor_col = (u16)col;
 }
+u32 console_cursor_row(void) { return cursor_row; }
+u32 console_cursor_col(void) { return cursor_col; }
 void console_put_at(u32 row, u32 col, char ch) {
     if (row >= ROWS || col >= COLS) return;
     text_buf[row][col] = ch;
@@ -221,6 +366,7 @@ u32 console_cols(void) { return COLS; }
 
 /* Minimal printf: %s %d %u %x %c %% */
 void console_printf(const char *fmt, ...) {
+    u32 tok = console_line_begin();
     __builtin_va_list ap;
     __builtin_va_start(ap, fmt);
     char buf[32];
@@ -241,4 +387,5 @@ void console_printf(const char *fmt, ...) {
         else { console_putchar('%'); console_putchar(*p); }
     }
     __builtin_va_end(ap);
+    console_line_end(tok);
 }

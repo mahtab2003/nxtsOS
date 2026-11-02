@@ -12,10 +12,10 @@
      frame length. A packet that claims a longer length than
      the frame carries is dropped, never read past the buffer.
    - No packet is ever executed or trusted: payloads are data.
-   - DHCP/DNS/TCP state lives in this module only; user programs
-     do not get raw sockets in v0.9.0 (shell commands only).
-     A user-mode socket API is a later phase, not a hidden
-     half-finished one. */
+   - DHCP/DNS/TCP state lives in this module only, except that
+     user programs DO get sockets now (net/sock.c + syscalls
+     22-28, §15.2) — still no raw sockets: only AF_INET
+     STREAM/DGRAM through the socket table. */
 
 /* Ethernet / IP addresses. IP is stored as 4 bytes in network
    order (a.b.c.d -> {a,b,c,d}); helpers convert to/from u32. */
@@ -71,8 +71,10 @@ int  net_ping(ip_t dst);         /* 0 reply received, -1 timeout/fail */
 /* DNS (net/net.c). Blocks up to ~3 s per server attempt. */
 int  net_dns_lookup(const char *name, ip_t *out); /* 0 found */
 
-/* TCP client (net/tcp.c). One connection at a time (v0.9.0
-   scope: a client for HTTP/HTTPS, not a general socket layer). */
+/* TCP client (net/tcp.c): a thin wrapper over ONE entry of
+   the socket table (net/sock.c). One legacy connection at
+   a time, as before; concurrent connections and servers use
+   the sock_* API directly. */
 int  net_tcp_connect(ip_t dst, u16 port);       /* 0 connected */
 int  net_tcp_send(const u8 *data, u32 len);     /* 0 sent */
 int  net_tcp_recv(u8 *buf, u32 max, u32 timeout_ticks); /* bytes, 0 = timeout/closed */

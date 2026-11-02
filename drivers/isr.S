@@ -71,8 +71,23 @@ IRQ 13, 13
 IRQ 14, 14
 IRQ 15, 15
 
+/* SMP (redesign 4): LAPIC stubs. Same frame shape as the IRQ
+   stubs, but the pushed number is the LAPIC vector (240/241/
+   255) and the handler is lapic_irq_handler in kernel/smp.c. */
+.macro LAPIC num
+.global lapic\num
+lapic\num:
+    pushl $0
+    pushl $\num
+    jmp lapic_common
+.endm
+LAPIC 240
+LAPIC 241
+LAPIC 255
+
 .extern isr_handler
 .extern irq_handler
+.extern lapic_irq_handler
 
 isr_common:
     pusha
@@ -106,6 +121,27 @@ irq_common:
     mov %ax, %gs
     push %esp
     call irq_handler
+    add $4, %esp
+    pop %eax
+    mov %ax, %ds
+    mov %ax, %es
+    mov %ax, %fs
+    mov %ax, %gs
+    popa
+    add $8, %esp
+    iret
+
+lapic_common:
+    pusha
+    mov %ds, %ax
+    push %eax
+    mov $0x10, %ax
+    mov %ax, %ds
+    mov %ax, %es
+    mov %ax, %fs
+    mov %ax, %gs
+    push %esp
+    call lapic_irq_handler
     add $4, %esp
     pop %eax
     mov %ax, %ds

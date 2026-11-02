@@ -8,6 +8,7 @@
 #include "net.h"
 #include "http.h"
 #include "fw.h"
+#include "sock.h"
 #include "../drivers/pit.h"
 
 static ip_t our_ip, netmask_ip, gateway_ip, dns_ip;
@@ -62,9 +63,14 @@ void net_ip_netmask(ip_t *out) { *out = netmask_ip; }
 
 /* Raw Ethernet send (caller supplies the full payload after
    the 14-byte header). */
+/* File-scope static, never a stack array: see pkt above
+   (same 16 KiB stack overflow via the TX chain). Scratch
+   only, consumed synchronously by net_send. */
+static u8 eth_frame_buf[1514];
+
 static int eth_send(const u8 *dst_mac, u16 ethertype, const u8 *payload, u32 len) {
     if (len > 1500) return -1;
-    u8 frame[1514];
+    u8 *frame = eth_frame_buf;
     mac_t mine; net_mac(&mine);
     memcpy(frame, dst_mac, 6);
     memcpy(frame + 6, mine.b, 6);
@@ -151,7 +157,14 @@ int net_ip_send(ip_t dst, u8 proto, const u8 *payload, u32 payload_len) {
     } else {
         memset(dst_mac.b, 0xFF, 6);
     }
-    u8 pkt[1420];
+    /* File-scope static, never a stack array: net_ip_send
+       sits below sock_send_seg in a deep TLS/repo/shell
+       chain, and pkt[1420] + eth frame[1514] + seg[1500]
+       together overflowed the 16 KiB kernel stack on the
+       deeper pkg-install chain (see sock_txseg_buf). The
+       buffer is scratch only, consumed synchronously by
+       eth_send/net_send before net_ip_send returns. */
+    static u8 pkt[1420];
     pkt[0] = 0x45; pkt[1] = 0;
     put16(pkt + 2, (u16)(20 + payload_len));
     put16(pkt + 4, ip_id_counter++);
@@ -258,6 +271,10 @@ static void udp_rx(const u8 *ip, u32 ip_len, ip_t src) {
     u16 dport = get16(udp + 2);
     const u8 *data = udp + 8;
     u32 data_len = udp_len - 8;
+    /* Socket layer first (§15.2): a bound UDP socket owns
+       its port, including over the built-in DHCP/DNS
+       clients. Unclaimed datagrams fall through below. */
+    if (sock_udp_rx_dispatch(ip, ip_len, src)) return;
     if (dport == 68) dhcp_rx(data, data_len);
     /* DNS replies arrive at the client's source port (5353,
        fixed in net_dns_lookup), NOT at port 53 — dispatching

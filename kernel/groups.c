@@ -113,6 +113,7 @@ int groups_load(void) {
 
 int groups_exists(const char *name) {
     if (!name) return 0;
+    if (fs_mounted()) groups_load();
     for (int i = 0; i < group_count; i++)
         if (strcmp(groups[i].name, name) == 0) return 1;
     return 0;
@@ -120,6 +121,10 @@ int groups_exists(const char *name) {
 
 int groups_gid(const char *name, u32 *gid_out) {
     if (!name || !gid_out) return -1;
+    /* Read-only accessors must see a pre-seeded groups.txt even
+       when no group mutator has run this boot (sudo/chgrp hit
+       this: the table was empty until a mutator loaded it). */
+    if (fs_mounted()) groups_load();
     for (int i = 0; i < group_count; i++)
         if (strcmp(groups[i].name, name) == 0) { *gid_out = groups[i].gid; return 0; }
     return -1;
@@ -273,4 +278,49 @@ int groups_names_for_user(const char *user, char *out, u32 cap) {
     }
     out[pos] = 0;
     return count;
+}
+
+/* Parity run: group permission helpers. Both load groups.txt
+   fresh, so groupmod takes effect immediately. No recursion
+   risk: groups_load reads via fs_read (uid 0), and the fs
+   permission rules return at the root check before ever
+   consulting membership. */
+u32 groups_primary_gid(u32 uid) {
+    if (fs_mounted()) groups_load();
+    if (uid == 0) return 0;
+    const char *name = users_name_for_uid(uid);
+    if (!name || strcmp(name, "unknown") == 0) return 0;
+    groups_load();
+    for (int i = 0; i < group_count; i++) {
+        for (int m = 0; m < groups[i].member_count; m++)
+            if (strcmp(groups[i].members[m], name) == 0) return groups[i].gid;
+    }
+    return 0;
+}
+
+int groups_user_in_gid(u32 uid, u32 gid) {
+    if (gid == 0) return 0;
+    const char *name = users_name_for_uid(uid);
+    if (!name || strcmp(name, "unknown") == 0) return 0;
+    groups_load();
+    for (int i = 0; i < group_count; i++) {
+        if (groups[i].gid != gid) continue;
+        for (int m = 0; m < groups[i].member_count; m++)
+            if (strcmp(groups[i].members[m], name) == 0) return 1;
+        return 0;
+    }
+    return 0;
+}
+
+int groups_name_for_gid(u32 gid, char *out, u32 cap) {
+    if (!out || cap == 0) return -1;
+    groups_load();
+    for (int i = 0; i < group_count; i++) {
+        if (groups[i].gid != gid) continue;
+        u32 j = 0;
+        while (groups[i].name[j] && j + 1 < cap) { out[j] = groups[i].name[j]; j++; }
+        out[j] = 0;
+        return 0;
+    }
+    return -1;
 }

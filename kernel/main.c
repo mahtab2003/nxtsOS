@@ -3,11 +3,13 @@
 #include "panic.h"
 #include "shell.h"
 #include "proc.h"
+#include "smp.h"
 #include "enc.h"
 #include "csprng.h"
 #include "fb.h"
 #include "../mm/pmm.h"
 #include "../mm/vmm.h"
+#include "../mm/kmalloc.h"
 #include "../drivers/gdt.h"
 #include "../drivers/idt.h"
 #include "../drivers/pic.h"
@@ -47,6 +49,16 @@ void kmain(u32 magic, u32 mbi_addr) {
     console_write("GDT installed (kernel 0x08/0x10, user 0x18/0x20, TSS 0x28)\n");
     vmm_init();
     console_write("Paging enabled (kernel identity-mapped 0-32 MB)\n");
+    /* Deep-core phase: kernel heap + boot self-test (its PASS line
+       is asserted by the deep-core QEMU suite via dmesg). */
+    kmalloc_init();
+    {
+        int kst = kmalloc_selftest();
+        u32 ku, kf, kb;
+        kmalloc_stats(&ku, &kf, &kb);
+        if (kst == 0) console_printf("kmalloc selftest: PASS (used %u free %u blocks %u)\n", ku, kf, kb);
+        else console_printf("kmalloc selftest: FAIL (%d)\n", kst);
+    }
     /* Framebuffer: after paging, so its physical pages can be mapped.
        v0.7.1: if GRUB did not set a graphics mode (the Bochs
        failure: kernel booted in text mode, `gui` said "no
@@ -90,6 +102,13 @@ void kmain(u32 magic, u32 mbi_addr) {
     (void)keyboard_drain_controller();
     __asm__ volatile ("sti");
     console_write("Interrupts enabled\n");
+    /* SMP (redesign 4): after interrupts are on (the INIT-SIPI
+       delays wait on PIT ticks) and before any user process
+       exists (user PDs share the LAPIC page only if smp_init
+       ran first). A failed AP boot leaves the kernel
+       uniprocessor-by-construction; nothing below depends on
+       the AP. */
+    smp_init();
     /* Network: NIC init must not fail the boot (a VM without a
        NIC still boots to the shell; net commands report it). */
     if (net_init() == 0) console_write("Network: e1000 ready (run dhcp)\n");

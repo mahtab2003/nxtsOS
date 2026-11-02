@@ -6,7 +6,7 @@
 #include "../fs/vfs.h"
 
 /* Nano-like full-screen editor. File-scope state only: the
-   kernel stack is 16 KiB, and the edit buffer alone is 32 KiB.
+   kernel stack is 16 KiB, and the edit buffer alone is 128 KiB.
    Line model: one flat buffer, lines split on '\n'. The cursor
    is (cy, cx): line index + column within that line. The
    window shows 23 text lines (rows 0-22); row 23 is the status
@@ -23,7 +23,7 @@
    back). A save therefore writes the normalised text, which
    is the text the user saw and edited. */
 
-#define EDIT_MAX 32768
+#define EDIT_MAX 131072
 #define EDIT_TEXT_ROWS 23
 #define EDIT_STATUS_ROW 23
 #define EDIT_HINT_ROW 24
@@ -38,6 +38,41 @@ static u32 edit_uid = 0;
 static char edit_cut[1025];
 static u32 edit_cut_len = 0; /* 0 = nothing cut */
 static char edit_msg[96]; /* status-row message, "" = none */
+/* Scratch for building one undo record (cut/paste runs are
+   not contiguous in the buffer). File-scope, never stack:
+   the kernel stack is 16 KiB. Single-threaded use only —
+   record_mutation copies it into the record at once. */
+static char edit_scratch[1025];
+
+/* Undo/redo: an OPERATION LOG, not snapshots (a snapshot per
+   level would cost 128 KiB each). Every mutation in this
+   editor is a single-char insert/delete, a '\n' insert/delete,
+   or a <=1025-byte cut/paste, so one record covers every
+   operation exactly: type 0 = text was INSERTED at off (undo
+   deletes it); type 1 = text was DELETED at off (undo
+   re-inserts it). Consecutive single-char inserts at
+   contiguous offsets coalesce (typing a word = one undo
+   step); consecutive backspaces coalesce backwards and
+   consecutive Del presses at one position coalesce forwards
+   (same contiguity argument, checked in the do_* wrappers).
+   Coalescing only ever joins chars that were adjacent in the
+   buffer at deletion/insertion time, so undoing a coalesced
+   record restores exactly what was there. When a stack is
+   full the OLDEST record is dropped (its text stays in the
+   buffer — only the ability to undo that step is lost, and
+   later records' offsets stay valid because the dropped
+   record's text was never reverted). A new mutation clears
+   the redo stack. Undo is buffer-local: a saved file stays
+   saved (the modified flag returns, the disk file does not
+   roll back — documented, not a bug). */
+#define EDIT_UNDO_DEPTH 64
+#define EDIT_UNDO_INS 0
+#define EDIT_UNDO_DEL 1
+typedef struct { u8 type; u32 off; u32 len; char text[1025]; } edit_undo_t;
+static edit_undo_t edit_undo[EDIT_UNDO_DEPTH];
+static u32 edit_undo_n = 0;
+static edit_undo_t edit_redo[EDIT_UNDO_DEPTH];
+static u32 edit_redo_n = 0;
 
 static int wait_key(void) {
     for (;;) {
@@ -139,7 +174,7 @@ static void render(void) {
     }
     st[p] = 0;
     draw_row_text(EDIT_STATUS_ROW, st);
-    draw_row_text(EDIT_HINT_ROW, "^O Save ^X Exit ^W Search ^K Cut ^U Paste ^G Help");
+    draw_row_text(EDIT_HINT_ROW, "^O Save ^X Exit ^W Search ^K Cut ^U Paste ^G Help ^Z Undo ^Y Redo");
     u32 crow = edit_cy - edit_top;
     if (crow >= EDIT_TEXT_ROWS) crow = EDIT_TEXT_ROWS - 1;
     console_set_cursor(crow, edit_cx);
@@ -190,28 +225,148 @@ static void buf_delete_range(u32 off, u32 count) {
     edit_buf[edit_len] = 0;
 }
 
+/* --- undo/redo stacks --- */
+/* Push onto a stack, dropping the oldest record when full. */
+static void undo_stack_push(edit_undo_t *stack, u32 *n, const edit_undo_t *rec) {
+    if (*n >= EDIT_UNDO_DEPTH) {
+        for (u32 i = 1; i < EDIT_UNDO_DEPTH; i++) stack[i - 1] = stack[i];
+        (*n)--;
+    }
+    stack[(*n)++] = *rec;
+}
+/* Record a fresh user mutation: clears redo, then pushes. */
+static void record_mutation(u8 type, u32 off, const char *text, u32 len) {
+    edit_redo_n = 0;
+    edit_undo_t rec;
+    rec.type = type;
+    rec.off = off;
+    rec.len = len;
+    for (u32 i = 0; i < len && i < sizeof(rec.text); i++) rec.text[i] = text[i];
+    undo_stack_push(edit_undo, &edit_undo_n, &rec);
+}
+static void cursor_to_off(u32 off) {
+    if (off > edit_len) off = edit_len;
+    u32 line = 0, ls = 0, p = 0;
+    while (p < off) {
+        if (edit_buf[p] == '\n') { line++; ls = p + 1; }
+        p++;
+    }
+    edit_cy = line;
+    edit_cx = off - ls;
+}
+static void buf_insert_range(u32 off, const char *text, u32 len) {
+    for (u32 i = 0; i < len; i++) buf_insert(off + i, text[i]);
+}
+static void do_undo(void) {
+    if (edit_undo_n == 0) { set_msg("edit: nothing to undo"); return; }
+    edit_undo_t rec = edit_undo[edit_undo_n - 1];
+    if (rec.type == EDIT_UNDO_DEL && edit_len + rec.len > EDIT_MAX) {
+        set_msg("edit: buffer full (max 131072 bytes)");
+        return; /* record stays: undo is still possible later */
+    }
+    edit_undo_n--;
+    if (rec.type == EDIT_UNDO_INS) {
+        buf_delete_range(rec.off, rec.len);
+        cursor_to_off(rec.off);
+    } else {
+        buf_insert_range(rec.off, rec.text, rec.len);
+        cursor_to_off(rec.off + rec.len);
+    }
+    undo_stack_push(edit_redo, &edit_redo_n, &rec);
+    edit_modified = 1;
+}
+static void do_redo(void) {
+    if (edit_redo_n == 0) { set_msg("edit: nothing to redo"); return; }
+    edit_undo_t rec = edit_redo[edit_redo_n - 1];
+    if (rec.type == EDIT_UNDO_INS && edit_len + rec.len > EDIT_MAX) {
+        set_msg("edit: buffer full (max 131072 bytes)");
+        return; /* record stays: redo is still possible later */
+    }
+    edit_redo_n--;
+    if (rec.type == EDIT_UNDO_INS) {
+        buf_insert_range(rec.off, rec.text, rec.len);
+        cursor_to_off(rec.off + rec.len);
+    } else {
+        buf_delete_range(rec.off, rec.len);
+        cursor_to_off(rec.off);
+    }
+    undo_stack_push(edit_undo, &edit_undo_n, &rec);
+    edit_modified = 1;
+}
+
 static void do_insert_char(char ch) {
-    if (buf_insert(cursor_off(), ch) != 0) { set_msg("edit: buffer full (max 32768 bytes)"); return; }
+    u32 off = cursor_off();
+    if (buf_insert(off, ch) != 0) { set_msg("edit: buffer full (max 131072 bytes)"); return; }
+    /* Coalesce with a directly preceding insert record. */
+    if (edit_undo_n > 0) {
+        edit_undo_t *top = &edit_undo[edit_undo_n - 1];
+        if (top->type == EDIT_UNDO_INS && top->off + top->len == off &&
+            top->len < 1024) {
+            top->text[top->len++] = ch;
+            edit_redo_n = 0;
+            edit_cx++;
+            edit_modified = 1;
+            return;
+        }
+    }
+    record_mutation(EDIT_UNDO_INS, off, &ch, 1);
     edit_cx++;
     edit_modified = 1;
 }
 static void do_enter(void) {
-    if (buf_insert(cursor_off(), '\n') != 0) { set_msg("edit: buffer full (max 32768 bytes)"); return; }
+    u32 off = cursor_off();
+    if (buf_insert(off, '\n') != 0) { set_msg("edit: buffer full (max 131072 bytes)"); return; }
+    record_mutation(EDIT_UNDO_INS, off, "\n", 1);
     edit_cy++;
     edit_cx = 0;
     edit_modified = 1;
 }
 static void do_backspace(void) {
     if (edit_cx > 0) {
-        buf_delete(cursor_off() - 1);
+        u32 off = cursor_off() - 1;
+        char ch = edit_buf[off];
+        buf_delete(off);
+        if (edit_undo_n > 0) {
+            edit_undo_t *top = &edit_undo[edit_undo_n - 1];
+            if (top->type == EDIT_UNDO_DEL && top->off == off + 1 &&
+                top->len < 1024) {
+                /* Prepend: this char stood just before the run. */
+                for (u32 i = top->len; i > 0; i--) top->text[i] = top->text[i - 1];
+                top->text[0] = ch;
+                top->len++;
+                top->off = off;
+                edit_redo_n = 0;
+                edit_cx--;
+                edit_modified = 1;
+                return;
+            }
+        }
+        record_mutation(EDIT_UNDO_DEL, off, &ch, 1);
         edit_cx--;
         edit_modified = 1;
     } else if (edit_cy > 0) {
         /* Join with the previous line: delete the newline
            before this line, cursor lands at the end of the
            previous line. */
+        u32 off = line_start(edit_cy) - 1;
         u32 prev_len = line_len(edit_cy - 1);
-        buf_delete(line_start(edit_cy) - 1);
+        buf_delete(off);
+        if (edit_undo_n > 0) {
+            edit_undo_t *top = &edit_undo[edit_undo_n - 1];
+            if (top->type == EDIT_UNDO_DEL && top->off == off + 1 &&
+                top->len < 1024) {
+                for (u32 i = top->len; i > 0; i--) top->text[i] = top->text[i - 1];
+                top->text[0] = '\n';
+                top->len++;
+                top->off = off;
+                edit_redo_n = 0;
+                edit_cy--;
+                edit_cx = prev_len;
+                edit_modified = 1;
+                return;
+            }
+        }
+        record_mutation(EDIT_UNDO_DEL, off, "\n", 1);
         edit_cy--;
         edit_cx = prev_len;
         edit_modified = 1;
@@ -219,12 +374,39 @@ static void do_backspace(void) {
 }
 static void do_delete(void) {
     if (edit_cx < line_len(edit_cy)) {
-        buf_delete(cursor_off());
+        u32 off = cursor_off();
+        char ch = edit_buf[off];
+        buf_delete(off);
+        if (edit_undo_n > 0) {
+            edit_undo_t *top = &edit_undo[edit_undo_n - 1];
+            if (top->type == EDIT_UNDO_DEL && top->off == off &&
+                top->len < 1024) {
+                /* Repeated Del at one position: the next char
+                   slides into the same slot, so it appends. */
+                top->text[top->len++] = ch;
+                edit_redo_n = 0;
+                edit_modified = 1;
+                return;
+            }
+        }
+        record_mutation(EDIT_UNDO_DEL, off, &ch, 1);
         edit_modified = 1;
     } else if (edit_cy + 1 < line_count()) {
         /* Join with the next line: delete the newline after
            this line. */
-        buf_delete(cursor_off());
+        u32 off = cursor_off();
+        buf_delete(off);
+        if (edit_undo_n > 0) {
+            edit_undo_t *top = &edit_undo[edit_undo_n - 1];
+            if (top->type == EDIT_UNDO_DEL && top->off == off &&
+                top->len < 1024) {
+                top->text[top->len++] = '\n';
+                edit_redo_n = 0;
+                edit_modified = 1;
+                return;
+            }
+        }
+        record_mutation(EDIT_UNDO_DEL, off, "\n", 1);
         edit_modified = 1;
     }
 }
@@ -235,16 +417,24 @@ static void do_cut(void) {
     for (u32 i = 0; i < ll; i++) edit_cut[i] = edit_buf[start + i];
     edit_cut[ll] = 0;
     edit_cut_len = ll;
+    /* Record the deleted run BEFORE deleting it: the run is
+       the line plus its newline (or the preceding newline +
+       the line for the last line, or just the line when it is
+       the only line) — at most 1025 bytes, fits the record. */
     if (edit_cy + 1 < line_count()) {
-        /* Delete the line plus its newline. */
+        for (u32 i = 0; i < ll; i++) edit_scratch[i] = edit_buf[start + i];
+        edit_scratch[ll] = '\n';
+        record_mutation(EDIT_UNDO_DEL, start, edit_scratch, ll + 1);
         buf_delete_range(start, ll + 1);
     } else if (edit_cy > 0) {
-        /* Last line: delete the line plus the preceding
-           newline, so no empty line is left behind. */
+        edit_scratch[0] = '\n';
+        for (u32 i = 0; i < ll; i++) edit_scratch[i + 1] = edit_buf[start + i];
+        record_mutation(EDIT_UNDO_DEL, start - 1, edit_scratch, ll + 1);
         buf_delete_range(start - 1, ll + 1);
         edit_cy--;
     } else {
-        /* Only line: the buffer becomes empty. */
+        for (u32 i = 0; i < ll; i++) edit_scratch[i] = edit_buf[start + i];
+        record_mutation(EDIT_UNDO_DEL, start, edit_scratch, ll);
         buf_delete_range(start, ll);
     }
     edit_cx = 0;
@@ -254,12 +444,16 @@ static void do_cut(void) {
 static void do_paste(void) {
     if (edit_cut_len == 0) { set_msg("edit: nothing to paste"); return; }
     if (edit_len + edit_cut_len + 1 > EDIT_MAX) {
-        set_msg("edit: buffer full (max 32768 bytes)");
+        set_msg("edit: buffer full (max 131072 bytes)");
         return;
     }
     u32 off = cursor_off();
     for (u32 i = 0; i < edit_cut_len; i++) buf_insert(off + i, edit_cut[i]);
     buf_insert(off + edit_cut_len, '\n');
+    /* Record the pasted run (cut text + newline) as one step. */
+    for (u32 i = 0; i < edit_cut_len; i++) edit_scratch[i] = edit_cut[i];
+    edit_scratch[edit_cut_len] = '\n';
+    record_mutation(EDIT_UNDO_INS, off, edit_scratch, edit_cut_len + 1);
     edit_cy++;
     edit_cx = 0;
     edit_modified = 1;
@@ -326,12 +520,14 @@ static void do_help(void) {
         "^W: search (next match after cursor, wraps once)",
         "^K: cut cursor line (max 1024 bytes)",
         "^U: paste cut line below the cursor line",
-        "Limits: 32 KiB file, no undo, no highlighting.",
+        "^Z: undo last change (typing runs undo as one step)",
+        "^Y: redo (cleared by any new change)",
+        "Limits: 128 KiB file, no highlighting.",
         "",
         "Press any key to return to editing.",
     };
     for (u32 r = 0; r < EDIT_TEXT_ROWS; r++) {
-        if (r < 15) draw_row_text(r, lines[r]);
+        if (r < 17) draw_row_text(r, lines[r]);
         else draw_row_text(r, "");
     }
     draw_row_text(EDIT_STATUS_ROW, "Help — press any key to return");
@@ -469,6 +665,8 @@ int editor_open(const char *filename, u32 uid) {
     edit_modified = 0;
     edit_cut_len = 0;
     edit_cut[0] = 0;
+    edit_undo_n = 0;
+    edit_redo_n = 0;
     edit_msg[0] = 0;
     /* Load: stat first (permission-checked). Missing file means
        a new empty buffer; an existing but unreadable file is a
@@ -478,7 +676,7 @@ int editor_open(const char *filename, u32 uid) {
     struct fs_stat st;
     if (fs_stat_as(filename, &st, uid) == 0) {
         if (st.size > EDIT_MAX) {
-            console_write("edit: file too large (max 32768 bytes)\n");
+            console_write("edit: file too large (max 131072 bytes)\n");
             return -1;
         }
         u32 off = 0;
@@ -492,7 +690,7 @@ int editor_open(const char *filename, u32 uid) {
                 if (ch == '\t') {
                     for (int s = 0; s < 4; s++) {
                         if (edit_len >= EDIT_MAX) {
-                            console_write("edit: file too large (max 32768 bytes)\n");
+                            console_write("edit: file too large (max 131072 bytes)\n");
                             return -1;
                         }
                         edit_buf[edit_len++] = ' ';
@@ -503,7 +701,7 @@ int editor_open(const char *filename, u32 uid) {
                     continue; /* other control bytes dropped */
                 } else {
                     if (edit_len >= EDIT_MAX) {
-                        console_write("edit: file too large (max 32768 bytes)\n");
+                        console_write("edit: file too large (max 131072 bytes)\n");
                         return -1;
                     }
                     edit_buf[edit_len++] = (char)ch;
@@ -567,6 +765,12 @@ int editor_open(const char *filename, u32 uid) {
             break;
         case 7: /* ^G help */
             do_help();
+            break;
+        case 26: /* ^Z undo */
+            do_undo();
+            break;
+        case 25: /* ^Y redo */
+            do_redo();
             break;
         case KEY_UP:
             if (edit_cy > 0) { edit_cy--; clamp_cursor(); }

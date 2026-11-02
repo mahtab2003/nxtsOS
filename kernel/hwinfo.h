@@ -37,6 +37,18 @@ int  hw_cpu_nx(void);
 typedef void (*hw_pci_cb)(u8 dev, u8 func, u16 vendor, u16 device,
                           u8 class_code, u8 subclass, u8 prog_if, u32 bar0);
 int  hw_pci_scan(hw_pci_cb cb);
+/* Full-detail PCI walk (Linux-comparability run): same scan, but
+   the callback also receives revision, all six BARs, and the IRQ
+   line, so `pci -v` can show them without touching the drivers'
+   private config readers. */
+typedef void (*hw_pci_detail_cb)(u8 dev, u8 func, u16 vendor, u16 device,
+                                 u8 class_code, u8 subclass, u8 prog_if, u8 rev,
+                                 u32 bar0, u32 bar1, u32 bar2, u32 bar3, u32 bar4, u32 bar5,
+                                 u8 irq);
+int  hw_pci_scan_detail(hw_pci_detail_cb cb);
+/* Logical CPU count from CPUID (leaf 0xB if present, else the HTT
+   bit in leaf 1 EBX, else 1). Never 0. */
+u32  hw_cpu_count(void);
 
 /* CMOS RTC (ports 0x70/0x71, NMI-disable bit set on the index
    write — the same pattern kernel/csprng.c uses for its boot
@@ -46,5 +58,7 @@ int  hw_pci_scan(hw_pci_cb cb);
    convention. */
 int  hw_rtc_read(u32 *year, u32 *mon, u32 *day,
                  u32 *hour, u32 *min, u32 *sec);
+int  hw_rtc_write(u32 year, u32 mon, u32 day,
+                  u32 hour, u32 min, u32 sec);
 
 #endif

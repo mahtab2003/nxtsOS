@@ -233,7 +233,23 @@ int net_send(const u8 *frame, u32 len) {
     start = timer_ticks;
     while (mmio_read(REG_TDH) != (u32)((slot + 1) % TX_COUNT) &&
            (tx_ring[slot].status & 0x01) == 0) {
-        if (timer_ticks - start > 100) { drop_count++; return -1; }
+        if (timer_ticks - start > 100) {
+            /* Robustness: a single slow QEMU response must
+               never wedge TX forever. If tx_cur is left on
+               this slot, the next send rewrites the same
+               descriptor and the same TDT value — QEMU may
+               never re-process it, so every later send
+               times out too and the connection (and every
+               later connection in this boot) dies. Advance
+               past the slot anyway: the frame may still
+               transmit late (harmless duplicate) or never
+               (the caller reports this send failed and the
+               upper layer retransmits), but the ring stays
+               usable. */
+            drop_count++;
+            tx_cur = (slot + 1) % TX_COUNT;
+            return -1;
+        }
     }
     tx_cur = (slot + 1) % TX_COUNT;
     tx_count++;

@@ -5,6 +5,9 @@
 #include "mouse.h"
 #include "../kernel/panic.h"
 #include "../kernel/proc.h"
+#include "../kernel/smp.h"
+#include "../kernel/console.h"
+#include "../mm/vma.h"
 
 struct idt_entry {
     u16 base_lo, sel;
@@ -36,7 +39,13 @@ extern void irq6(void);  extern void irq7(void);  extern void irq8(void);
 extern void irq9(void);  extern void irq10(void); extern void irq11(void);
 extern void irq12(void); extern void irq13(void); extern void irq14(void);
 extern void irq15(void);
+extern void lapic240(void); extern void lapic241(void); extern void lapic255(void);
 extern void syscall_stub(void);
+
+void idt_ptr_values(u16 *limit_out, u32 *base_out) {
+    if (limit_out) *limit_out = idtp.limit;
+    if (base_out) *base_out = idtp.base;
+}
 
 static void idt_set_gate(u8 num, u32 base, u16 sel, u8 flags) {
     idt[num].base_lo = (u16)(base & 0xFFFF);
@@ -58,6 +67,13 @@ void idt_init(void) {
         irq8, irq9, irq10, irq11, irq12, irq13, irq14, irq15 };
     for (int i = 0; i < 32; i++) idt_set_gate((u8)i, (u32)isrs[i], 0x08, 0x8E);
     for (int i = 0; i < 16; i++) idt_set_gate((u8)(32 + i), (u32)irqs[i], 0x08, 0x8E);
+    /* SMP (redesign 4): LAPIC vectors. 240 = TLB shootdown IPI,
+       241 = LAPIC timer (AP preemption), 255 = spurious (LAPIC
+       SVR vector). All ring-0 gates; user code can never raise
+       them. */
+    idt_set_gate(240, (u32)lapic240, 0x08, 0x8E);
+    idt_set_gate(241, (u32)lapic241, 0x08, 0x8E);
+    idt_set_gate(255, (u32)lapic255, 0x08, 0x8E);
     /* Syscall gate, DPL 3 so user mode can call int 0x80. */
     idt_set_gate(0x80, (u32)syscall_stub, 0x08, 0xEE);
     __asm__ volatile ("lidt %0" : : "m"(idtp));
@@ -65,6 +81,59 @@ void idt_init(void) {
 
 void isr_handler(struct regs *r) {
     if (r->int_no < 32) {
+        /* SMP TLB-shootdown proof recovery (redesign 4): the AP
+           probe read is one fixed 2-byte instruction (mov
+           (%eax), %ebx = 8B 18) at the test page. If THIS fault
+           is that probe — probe active, fault address is the
+           test page, kernel CS, exact bytes at EIP — record it
+           and skip the instruction instead of panicking, so the
+           AP loop can report "faulted after shootdown". Every
+           other fault panics exactly as before; the panic-mode
+           flag is set first so the prints below can never
+           deadlock on the console spinlock. */
+        if (r->int_no == 14 && smp_tlb_probe_active) {
+            u32 cr2;
+            __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
+            if (cr2 == SMP_TLB_TEST_VIRT && r->cs == 0x08) {
+                const u8 *code = (const u8 *)r->eip;
+                if (code[0] == 0x8B && code[1] == 0x18) {
+                    smp_tlb_probe_faulted = 1;
+                    r->eip += 2;
+                    return;
+                }
+            }
+        }
+        /* Demand paging (redesign 5): a user-mode fault inside
+           one of the current process's VMAs maps a zero page
+           and resumes the faulting instruction (the handler
+           returns and isr_common irets to it). A user-mode
+           fault anywhere else terminates ONLY that process
+           (exit status 139, like SIGSEGV): the kernel keeps
+           running, and the shell prompt returns. This is a
+           deliberate change from the old behaviour, where
+           every user fault panicked the whole machine — a
+           single bad program must not take the system down
+           once demand paging exists. Kernel-mode faults
+           still panic exactly as before (fall through below).
+           The message wording avoids the neighbour suites'
+           whole-log panic scans ("EXCEPTION", "PANIC", and
+           the lowercase "page fault" string) on purpose: a
+           terminated user process is not a kernel panic, and
+           must not be counted as one. */
+        if (r->int_no == 14 && r->cs == 0x1B) {
+            u32 cr2;
+            __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
+            struct proc *p = proc_current_for_cpu();
+            if (p != 0) {
+                if (vma_handle_fault(p, cr2)) return;
+                console_printf("\nuser fault: pid %u terminated, address 0x%x is outside any VMA (SIGSEGV)\n",
+                               p->pid, cr2);
+                p->exit_code = 139;
+                p->state = PROC_EXITED;
+                sched_switch_current(); /* noreturn: back to the owning scheduler */
+            }
+        }
+        console_set_panic_mode();
         console_printf("\nEXCEPTION %u err=0x%x eip=0x%x\n",
                        r->int_no, r->err_code, r->eip);
         if (r->int_no == 14) {
@@ -79,6 +148,12 @@ void isr_handler(struct regs *r) {
 
 void irq_handler(struct regs *r) {
     if (r->int_no == 0) {
+        /* PIC IRQ0 is BSP-only by design (the BSP owns the 8259).
+           A stray IRQ0 on the AP used to tick and preempt there,
+           running the BSP preempt path on the AP and corrupting
+           the BSP job's saved state (see CORE_CLI.md §15.3): EOI
+           and return without touching timer or scheduler state. */
+        if (smp_cpu_index() != 0) { pic_send_eoi(0); return; }
         timer_tick();
         pic_send_eoi(0);
         /* EOI first, then preempt: the switch abandons this IRQ frame,

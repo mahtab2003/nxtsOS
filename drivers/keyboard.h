@@ -19,6 +19,20 @@ int  keyboard_getchar(void);
 #define KEY_HOME 0x107
 #define KEY_END  0x108
 #define KEY_DEL  0x109
+/* Redesign 5 foreground Ctrl-C (CORE_CLI.md section 15.4):
+   peek, never consume, the type-ahead buffer. keyboard_peek
+   returns the head byte (-1 when empty); keyboard_peek_at
+   returns the i-th buffered byte (-1 past the end). Neither
+   removes anything. keyboard_peek_ctrl_c scans for a Ctrl-C
+   byte (3) and removes ONLY that byte (shifting the rest),
+   so input typed before or after it is never eaten; it
+   returns 1 when it found (and consumed) one, else 0. The
+   scan runs with interrupts saved/restored, so an IRQ
+   cannot append mid-shift. Callers must run with interrupts
+   enabled (the foreground exec loop does). */
+int  keyboard_peek(void);
+int  keyboard_peek_at(u32 idx);
+int  keyboard_peek_ctrl_c(void);
 void keyboard_inject_char(char c); /* test-only: push an ASCII char into the buffer */
 void keyboard_flush(void); /* discard buffered keys (login/lock/logout) */
 void keyboard_poll(void); /* pick up a pending byte without an IRQ */

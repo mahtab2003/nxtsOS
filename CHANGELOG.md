@@ -8,6 +8,34 @@
 > contemporary notes, and no test result is claimed here beyond what
 > those reports record. Entries 0.1.0–0.2.0 are the original notes.
 
+## 1.1.6 — Accumulation release: Linux-comparability + deep-core + all five core redesigns
+
+- Real VFS tree with directories (82 checks): permission-gated
+  traversal, symlink hop budget, hard links, root-only chown/chgrp
+  in the fs layer.
+- Block-device layer (30 checks): bounded queue with merging,
+  read-only fsck, inactive swap slots.
+- Socket layer + TCP server (36 checks): firewall-before-dispatch,
+  privileged ports root-only at bind and listen, clamped backlog.
+- SMP stabilised (52 checks): AP IRQ0/preempt root cause fixed,
+  plus the LAPIC publish-before-map race panic fixed during the
+  release gate (map first, then publish).
+- Redesign 5 (79 checks): demand paging with VMA bounds, vruntime
+  scheduling, capabilities (MAC hook honestly a no-op), quoting,
+  foreground Ctrl-C, multi-session foundations.
+- Linux-comparability + deep-core: parity, linuxcomp, deepcore,
+  topk families — mm/kmalloc arena, reap table, bg-only signals,
+  per-process fd tables + syscalls 14–21, FIFOs, PROC_BLOCKED
+  retry, brk heap, flock.
+- Gate fix: sysupdate snapshot stack overflow (three 8 KiB journal
+  arrays on the 16 KiB kernel stack corrupted `.rodata.str1.1`,
+  killing the fs/pkg/net group names) — arrays moved to
+  file-scope statics; full chain re-run on the rebuilt ISO.
+- Full gate: 120/120 suites PASS on the release ISO
+  (5,687,296 bytes, SHA-256
+  2f53912c3985200d4ceaff4c5354c62dd87624bdabee4070868b8e285813871d).
+  See releases/v1.1.6/TEST_REPORT.md and SECURITY_REPORT.md.
+
 ## 1.1.5 — Accumulation release: core CLI completion (hardware/resources, shutdown, users/groups, editor, firewall)
 
 - Hardware control + resources via the terminal: `diag cpu/pci/disk`

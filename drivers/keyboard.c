@@ -223,6 +223,40 @@ int keyboard_getchar(void) {
     return c;
 }
 
+int keyboard_peek(void) {
+    if (head == tail) return -1;
+    return buf[tail];
+}
+
+int keyboard_peek_at(u32 idx) {
+    u32 n = (head + BUF_SIZE - tail) % BUF_SIZE;
+    if (idx >= n) return -1;
+    return buf[(tail + idx) % BUF_SIZE];
+}
+
+int keyboard_peek_ctrl_c(void) {
+    /* Save IF, mask IRQs for the scan + shift, restore IF
+       from the saved flags (never an unconditional sti: the
+       caller may run with interrupts off). The IRQ handler
+       only appends at head, so masking it for a <=256-byte
+       shift cannot lose a byte — the controller holds the
+       next byte until its IRQ is serviced. */
+    u32 flags;
+    __asm__ volatile ("pushfl\n\tpopl %0\n\tcli" : "=r"(flags) :: "memory");
+    int found = 0;
+    u32 n = (head + BUF_SIZE - tail) % BUF_SIZE;
+    for (u32 i = 0; i < n; i++) {
+        if (buf[(tail + i) % BUF_SIZE] != 3) continue;
+        for (u32 j = i + 1; j < n; j++)
+            buf[(tail + j - 1) % BUF_SIZE] = buf[(tail + j) % BUF_SIZE];
+        head = (head + BUF_SIZE - 1) % BUF_SIZE;
+        found = 1;
+        break;
+    }
+    if (flags & 0x200u) __asm__ volatile ("sti");
+    return found;
+}
+
 /* Discard any buffered keys. Used on login, lock, and logout, so a
    key typed during a previous session (or during a lock prompt) is
    never consumed as the next session's username, password, or first

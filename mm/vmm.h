@@ -13,6 +13,7 @@ void vmm_init(void);
 u32  vmm_kernel_pd(void);
 u32  vmm_create_pd(void);
 void vmm_map_page(u32 pd_phys, u32 virt, u32 phys, u32 flags);
+void vmm_unmap_page(u32 pd_phys, u32 virt); /* clear one PTE, keep its PT */
 u32  vmm_map_user(u32 pd_phys, const u8 *blob, u32 blob_size); /* returns code pages */
 void vmm_enable_paging(u32 pd_phys);
 void vmm_destroy_pd(u32 pd_phys); /* free user frames, PTs, and the PD itself */

@@ -28,6 +28,7 @@ int  pkg_repo_set(const char *url);
    message, never stale or unverified entries. No root check:
    read-only like `pkg list` and the Repo window. */
 int  pkg_repo_avail(void);
+int  pkg_repo_search(const char *pattern);
 int  pkg_repo_update(void);
 int  pkg_repo_fetch(const char *name);
 int  pkg_repo_install(const char *name);

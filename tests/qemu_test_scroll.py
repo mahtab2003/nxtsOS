@@ -118,7 +118,7 @@ log = log_text()
 for m in ["PID  NAME  UID", "pid 10  spin.elf  uid 0", "(1 background job(s))",
           "NAME                    SIZE  UID  MODE", "spin.elf",
           "(1 files)", "(no packages installed)", "nxtsOS v" + VER,
-          "Command groups: system, session, fs, proc, pkg, net, crypto, diag, gui, test", "W" * 80]:
+          "Command groups: system, session, fs, proc, pkg, net, crypto, diag, gui, text, test", "W" * 80]:
     f = m in log; print(f"{'PASS' if f else 'FAIL'} serial: {m[:48]}"); ok = ok and f
 for bad in ["EXCEPTION", "PANIC", "page fault"]:
     f = bad not in log; print(f"{'PASS' if f else 'FAIL'} serial: absent {bad}"); ok = ok and f

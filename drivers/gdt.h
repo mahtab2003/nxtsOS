@@ -7,7 +7,9 @@
    selectors (code 0x10, data 0x18), and using 0x08/0x10 against GRUB's
    GDT triple-faults on the first interrupt (v0.1.0 QEMU bug).
    Layout: 0x08 kernel code, 0x10 kernel data, 0x18 user code,
-   0x20 user data, 0x28 TSS. */
+   0x20 user data, 0x28 TSS, 0x30 AP TSS (SMP, redesign 4). */
 void gdt_init(void);
 void tss_set_esp0(u32 esp0);
+void tss_set_esp0_ap(u32 esp0);
+void gdt_ptr_values(u16 *limit_out, u32 *base_out);
 #endif

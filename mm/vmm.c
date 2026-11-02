@@ -1,6 +1,7 @@
 #include "vmm.h"
 #include "pmm.h"
 #include "../kernel/panic.h"
+#include "../kernel/smp.h"
 
 static u32 kernel_pd = 0;
 
@@ -49,18 +50,35 @@ void vmm_init(void) {
 
 u32 vmm_kernel_pd(void) { return kernel_pd; }
 
+void vmm_unmap_page(u32 pd_phys, u32 virt) {
+    u32 *pd = (u32 *)phys_to_virt(pd_phys);
+    u32 pd_idx = virt >> 22;
+    u32 pt_idx = (virt >> 12) & 0x3FF;
+    if ((pd[pd_idx] & PAGE_PRESENT) == 0) return;
+    u32 *pt = (u32 *)phys_to_virt(pd[pd_idx] & ~0xFFFu);
+    pt[pt_idx] = 0;
+    /* The caller invalidates its own TLB entry (invlpg); other
+       CPUs are reached by SMP TLB shootdown (kernel/smp.c). */
+}
+
 void vmm_destroy_pd(u32 pd_phys) {
     if (pd_phys == 0 || pd_phys == kernel_pd) return;
     /* Switch back to the kernel PD first: the PD being freed must not
        be the active one when its frames are returned to the PMM. */
     vmm_enable_paging(kernel_pd);
     u32 *pd = (u32 *)phys_to_virt(pd_phys);
-    /* PD entries 0-7 are the shared kernel region, and entry 256 is
-       the shared framebuffer (see vmm_create_pd) — both belong to
-       the kernel PD and must never be freed here. Only the other
-       entries (user space) are freed. */
+    /* PD entries 0-7 are the shared kernel region, and entries
+       256 (framebuffer), 260 (e1000 MMIO window) and the LAPIC
+       entry (see vmm_create_pd) are shared too — all belong to
+       the kernel PD and must never be freed here. Only the
+       other entries (user space) are freed. */
+    u32 lapic_idx = 0xFFFFFFFFu;
+    {
+        u32 lb = smp_lapic_base();
+        if (lb != 0) lapic_idx = lb >> 22;
+    }
     for (int i = 8; i < 1024; i++) {
-        if (i == 256) continue;
+        if (i == 256 || i == 260 || (u32)i == lapic_idx) continue;
         if ((pd[i] & PAGE_PRESENT) == 0) continue;
         u32 pt_phys = pd[i] & ~0xFFFu;
         u32 *pt = (u32 *)phys_to_virt(pt_phys);
@@ -91,18 +109,40 @@ u32 vmm_create_pd(void) {
        entry, so it is shared by the same copy. User code itself
        (ring 3) still cannot access these supervisor pages
        directly.
-       NOTE: the e1000 MMIO region (PD entry 260, 0x41000000) is
-       deliberately NOT shared here. No syscall touches MMIO, so
-       syscall-context kernel code never needs it; and kernel/
-       scheduler code outside syscalls always runs with the kernel
-       PD, because run_process() restores it on return from a user
-       switch (see proc.c — a missing restore there once made the
-       first network send after a background-job tick page-fault
-       on the MMIO read). If a future syscall ever needs MMIO,
-       share entry 260 here AND teach vmm_destroy_pd to skip it
-       (it currently frees every entry except 256 — freeing a
-       shared table would corrupt the kernel PD). */
+       The e1000 MMIO window (PD entry 260, 0x41000000) is
+       shared here too, since §15.2: socket syscalls are the
+       first syscalls that touch the NIC, and without this
+       entry a user program's connect() page-faulted on the
+       first MMIO read (the variable holding the base lives
+       in shared .bss, so the fault address was the window
+       itself, 0x41003810 for TDH — not a bad pointer).
+       Sharing is safe: the window's pages are supervisor
+       (no PAGE_USER), so ring-3 user code still cannot
+       touch them; only ring-0 syscall-context code can.
+       Kernel/scheduler code outside syscalls always runs
+       with the kernel PD, because run_process() restores
+       it on return from a user switch (see proc.c — a
+       missing restore there once made the first network
+       send after a background-job tick page-fault on the
+       MMIO read). vmm_destroy_pd MUST skip entry 260
+       alongside 256: freeing a shared table would corrupt
+       the kernel PD. */
     npd[256] = kpd[256];
+    npd[260] = kpd[260];
+    /* SMP (redesign 4): the LAPIC page is shared like the MMIO
+       window above, so IRQ/syscall context on any CPU can write
+       EOI even while a user PD is active. Supervisor pages, so
+       ring-3 user code still cannot touch them. The entry is
+       copied only once the LAPIC is known (smp_init runs before
+       proc_init); PDs created earlier simply lack it, and the
+       kernel PD itself always has it. vmm_destroy_pd MUST skip
+       this entry alongside 256/260 (it does: only entries
+       8..1023 except 256/260 are freed — see the loop below,
+       which now also skips the LAPIC entry). */
+    {
+        u32 lb = smp_lapic_base();
+        if (lb != 0) npd[lb >> 22] = kpd[lb >> 22];
+    }
     return pd;
 }
 

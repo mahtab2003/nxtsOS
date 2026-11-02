@@ -12,7 +12,7 @@ MARKERS = [
     "GDT installed",
     "Interrupts enabled",
     "nxts> ",
-    "Command groups: system, session, fs, proc, pkg, net, crypto, diag, gui, test",
+    "Command groups: system, session, fs, proc, pkg, net, crypto, diag, gui, text, test",
     "Memory: total",
 ]
 

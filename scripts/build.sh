@@ -29,6 +29,14 @@ gcc -m32 -ffreestanding -O0 -Wall -Wextra -fno-stack-protector -fno-pic -fno-pie
 gcc -m32 -no-pie -Wl,--build-id=none -T userland/linker.ld -nostdlib \
     -o build/slow.elf build/user_start.o build/slow_main.o
 gcc -m32 -ffreestanding -O0 -Wall -Wextra -fno-stack-protector -fno-pic -fno-pie -no-pie -nostdlib \
+    -c userland/longrun.c -o build/longrun_main.o
+gcc -m32 -no-pie -Wl,--build-id=none -T userland/linker.ld -nostdlib \
+    -o build/longrun.elf build/user_start.o build/longrun_main.o
+gcc -m32 -ffreestanding -O0 -Wall -Wextra -fno-stack-protector -fno-pic -fno-pie -no-pie -nostdlib \
+    -c userland/slow10.c -o build/slow10_main.o
+gcc -m32 -no-pie -Wl,--build-id=none -T userland/linker.ld -nostdlib \
+    -o build/slow10.elf build/user_start.o build/slow10_main.o
+gcc -m32 -ffreestanding -O0 -Wall -Wextra -fno-stack-protector -fno-pic -fno-pie -no-pie -nostdlib \
     -c userland/greet.c -o build/greet_main.o
 gcc -m32 -no-pie -Wl,--build-id=none -T userland/linker.ld -nostdlib \
     -o build/greet.elf build/user_start.o build/greet_main.o
@@ -56,6 +64,20 @@ gcc -m32 -ffreestanding -O0 -Wall -Wextra -fno-stack-protector -fno-pic -fno-pie
     -c userland/sysinfo.c -o build/sysinfo_main.o
 gcc -m32 -no-pie -Wl,--build-id=none -T userland/linker.ld -nostdlib \
     -o build/sysinfo.elf build/user_start.o build/sysinfo_main.o
+gcc -m32 -ffreestanding -O0 -Wall -Wextra -fno-stack-protector -fno-pic -fno-pie -no-pie -nostdlib \
+    -c userland/exitcode.c -o build/exitcode_main.o
+gcc -m32 -no-pie -Wl,--build-id=none -T userland/linker.ld -nostdlib \
+    -o build/exitcode.elf build/user_start.o build/exitcode_main.o
+gcc -m32 -ffreestanding -O0 -Wall -Wextra -fno-stack-protector -fno-pic -fno-pie -no-pie -nostdlib \
+    -c userland/pagetest.c -o build/pagetest_main.o
+gcc -m32 -no-pie -Wl,--build-id=none -T userland/linker.ld -nostdlib \
+    -o build/pagetest.elf build/user_start.o build/pagetest_main.o
+for prog in fdtest fifowriter fiforeader flocklock flocktry permtest sockprog; do
+gcc -m32 -ffreestanding -O0 -Wall -Wextra -fno-stack-protector -fno-pic -fno-pie -no-pie -nostdlib \
+    -c userland/$prog.c -o build/${prog}_main.o
+gcc -m32 -no-pie -Wl,--build-id=none -T userland/linker.ld -nostdlib \
+    -o build/$prog.elf build/user_start.o build/${prog}_main.o
+done
 ls -l build/hello.elf build/evil.elf build/slow.elf build/greet.elf build/hello2.elf build/calc.elf build/term.elf build/guibad.elf build/bench.elf build/sysinfo.elf
 # Vendor signing key (Phase 11): generated ONCE and kept in build/
 # (git-ignored, never archived). Deleting it creates a new keypair,
@@ -92,6 +114,12 @@ grep -q "nxtsOS v$(cat VERSION)" kernel/main.c || { echo "version mismatch: kern
 grep -q "nxtsOS v$(cat VERSION)" kernel/wm.c || { echo "version mismatch: kernel/wm.c About literal does not match VERSION"; exit 1; }
 # Same guard for the shell `ver` literal (Work D).
 grep -q "nxtsOS v$(cat VERSION)" kernel/shell.c || { echo "version mismatch: kernel/shell.c ver literal does not match VERSION"; exit 1; }
+echo "--- AP trampoline (SMP, redesign 4) ---"
+gcc $CFLAGS -c boot/trampoline.S -o build/trampoline.o
+ld -m elf_i386 -Ttext 0 -nostdlib -o build/trampoline.elf build/trampoline.o
+objcopy -O binary build/trampoline.elf build/trampoline.bin
+python3 tools/gentramp.py build/trampoline.elf build/trampoline.bin kernel/tramp_offsets.h
+ls -l build/trampoline.bin
 echo "--- compiling kernel ---"
 gcc $CFLAGS -c boot/boot.S -o build/boot.o
 gcc $CFLAGS -c drivers/isr.S -o build/isr.o
@@ -99,11 +127,12 @@ gcc $CFLAGS -c drivers/gdt.S -o build/gdt_asm.o
 gcc $CFLAGS -c kernel/switch.S -o build/switch.o
 gcc $CFLAGS -c kernel/syscall.S -o build/syscall_asm.o
 gcc $CFLAGS -c kernel/user_blob.S -o build/user_blob.o
+gcc $CFLAGS -c kernel/tramp_blob.S -o build/tramp_blob.o
 for f in kernel/util.c kernel/console.c kernel/panic.c kernel/shell.c kernel/main.c kernel/hwinfo.c kernel/acpi.c kernel/groups.c kernel/editor.c \
-         kernel/proc.c kernel/syscall.c kernel/users.c kernel/elf.c kernel/sha256.c kernel/md5.c kernel/sha1.c kernel/pkg.c kernel/aes.c kernel/enc.c kernel/fb.c kernel/wm.c kernel/csprng.c \
+         kernel/proc.c kernel/syscall.c kernel/fd.c kernel/users.c kernel/elf.c kernel/sha256.c kernel/md5.c kernel/sha1.c kernel/pkg.c kernel/aes.c kernel/enc.c kernel/fb.c kernel/wm.c kernel/csprng.c kernel/smp.c kernel/caps.c \
          drivers/serial.c drivers/idt.c drivers/pic.c drivers/pit.c drivers/keyboard.c drivers/mouse.c \
-         drivers/gdt.c drivers/ata.c fs/nxtsfs.c mm/pmm.c mm/vmm.c \
-         net/e1000.c net/net.c net/tcp.c net/tls.c net/http.c net/fw.c net/nettest.c net/bignum.c net/rsaverify.c net/ec256.c; do
+         drivers/gdt.c drivers/ata.c drivers/blk.c fs/nxtsfs.c mm/pmm.c mm/vmm.c mm/kmalloc.c mm/vma.c \
+         net/e1000.c net/net.c net/tcp.c net/sock.c net/tls.c net/http.c net/fw.c net/nettest.c net/bignum.c net/rsaverify.c net/ec256.c; do
     o="build/$(basename "$f" .c).o"
     echo "cc $f -> $o"
     gcc $CFLAGS -c "$f" -o "$o"
@@ -113,10 +142,10 @@ echo "--- linking ---"
 # division calls (see util.c), so it links freestanding without it.
 gcc -m32 -no-pie -Wl,--build-id=none -T boot/linker.ld -nostdlib -o build/nxtsOS.bin \
     build/boot.o build/isr.o build/gdt_asm.o build/switch.o build/syscall_asm.o \
-    build/user_blob.o build/util.o build/console.o build/panic.o \
-    build/shell.o build/main.o build/hwinfo.o build/acpi.o build/groups.o build/editor.o build/proc.o build/syscall.o build/users.o build/elf.o build/sha256.o build/md5.o build/sha1.o build/pkg.o build/aes.o build/enc.o build/fb.o build/wm.o build/csprng.o build/serial.o build/idt.o \
-    build/pic.o build/pit.o build/keyboard.o build/mouse.o build/gdt.o build/ata.o build/nxtsfs.o build/pmm.o build/vmm.o \
-    build/e1000.o build/net.o build/tcp.o build/tls.o build/http.o build/fw.o build/nettest.o build/bignum.o build/rsaverify.o build/ec256.o
+    build/user_blob.o build/tramp_blob.o build/util.o build/console.o build/panic.o build/smp.o \
+    build/shell.o build/main.o build/hwinfo.o build/acpi.o build/groups.o build/editor.o build/proc.o build/syscall.o build/fd.o build/users.o build/elf.o build/sha256.o build/md5.o build/sha1.o build/pkg.o build/aes.o build/enc.o build/fb.o build/wm.o build/csprng.o build/caps.o build/serial.o build/idt.o \
+    build/pic.o build/pit.o build/keyboard.o build/mouse.o build/gdt.o build/ata.o build/blk.o build/nxtsfs.o build/pmm.o build/vmm.o build/kmalloc.o \
+    build/e1000.o build/net.o build/tcp.o build/sock.o build/tls.o build/http.o build/fw.o build/nettest.o build/bignum.o build/rsaverify.o build/ec256.o build/vma.o
 ls -l build/nxtsOS.bin
 if command -v grub-file >/dev/null 2>&1; then
     grub-file --is-x86-multiboot build/nxtsOS.bin && echo "grub-file: multiboot OK"

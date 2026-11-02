@@ -425,7 +425,39 @@ try:
     seg = sh(s, "cat tab.txt", "alice")
     check(seg is not None and "a    b" in seg, "tab expands to 4 spaces")
     seg = sh(s, "edit big.txt", "alice")
-    check(seg is not None and "edit: file too large (max 32768 bytes)" in seg, "oversized file refused")
+    check(seg is not None and "edit: file too large (max 131072 bytes)" in seg, "oversized file refused")
+    edopen(s, "mid.txt")
+    check(edsave(s, "mid.txt"), "save mid.txt (100 KiB under cap)")
+    check(edexit(s), "exit mid.txt")
+    seg = sh(s, "cat mid.txt", "alice")
+    check(seg is not None and "y" * 60 in seg, "100 KiB file loads + saves round-trip")
+    # Undo/redo round-trip: type two lines (records: "hello",
+    # "\n", "world"), undo all three, redo all three, save.
+    # Symmetric by design: a doubled ^Z/^Y sendkey only adds
+    # no-op steps at an empty stack, so the final text is the
+    # same — the check stays exact.
+    edopen(s, "und.txt")
+    edtype(s, "hello")
+    edenter(s)
+    edtype(s, "world")
+    edkey(s, "ctrl-z")
+    edkey(s, "ctrl-z")
+    edkey(s, "ctrl-z")
+    edkey(s, "ctrl-y")
+    edkey(s, "ctrl-y")
+    edkey(s, "ctrl-y")
+    check(edsave(s, "und.txt"), "save und.txt after undo/redo")
+    check(edexit(s), "exit und.txt")
+    seg = sh(s, "cat und.txt", "alice")
+    check(seg is not None and "hello" in seg and "world" in seg, "undo/redo round-trip restores text")
+    # Cut-undo: cut line1, ^Z restores it, save, both lines back.
+    edopen(s, "undo.txt")
+    edkey(s, "ctrl-k")
+    edkey(s, "ctrl-z")
+    check(edsave(s, "undo.txt"), "save undo.txt after cut-undo")
+    check(edexit(s), "exit undo.txt")
+    seg = sh(s, "cat undo.txt", "alice")
+    check(seg is not None and "line1" in seg and "line2" in seg, "cut undo restores line")
     edopen(s, "long.txt")
     edkey(s, "ctrl-k")  # overlong line: cut refused, line intact
     check(edsave(s, "long.txt"), "save long.txt after refused cut")

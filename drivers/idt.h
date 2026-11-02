@@ -7,6 +7,7 @@ struct regs {
     u32 eip, cs, eflags, useresp, ss;
 };
 void idt_init(void);
+void idt_ptr_values(u16 *limit_out, u32 *base_out);
 void isr_handler(struct regs *r);
 void irq_handler(struct regs *r);
 #endif

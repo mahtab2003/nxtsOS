@@ -94,7 +94,7 @@ _, log = boot([
 ])
 for m in [
     # Group index (bare help).
-    "Command groups: system, session, fs, proc, pkg, net, crypto, diag, gui, test",
+    "Command groups: system, session, fs, proc, pkg, net, crypto, diag, gui, text, test",
     "  net: Network, web, and trust stores",
     "  test: Self-tests and autotest scripts",
     "Type 'help <group>' for a group's commands",

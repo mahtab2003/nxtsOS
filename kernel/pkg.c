@@ -715,13 +715,29 @@ static int snap_have(const char *orig) {
     return 0;
 }
 
+/* Snapshot / rollback journal buffers are file-scope statics,
+   NEVER stack arrays: the old 8 KiB stack jb in each of
+   snap_delete_old / snap_take / snap_restore nested (snap_take
+   calls snap_delete_old) under the shell + execute + sysupdate
+   frames, blowing past the 16 KiB kernel stack and scribbling
+   frames over .rodata.str1.1 (seen live 2026-11-02: after a
+   second sysupdate, the "fs"/"pkg"/"net" group-name literals —
+   suffixes of "cap_fs"/"cap_pkg"/"cap_net" — read as empty, so
+   `pkg list`, `fs ls` and `help pkg` all failed with "Unknown
+   command", while .rodata itself and the help-table pointers
+   were intact). Separate buffers per function: snap_take calls
+   snap_delete_old, so sharing one buffer would clobber. */
+static u8 snap_del_jb[8192];
+static char snap_take_jb[8192];
+static u8 snap_restore_jb[8192];
+
 /* Delete a previous snapshot's files, using ITS journal as the
    list (never blind-delete rb* names: those could be user files
    if no snapshot journal exists). Returns 0 even if nothing
    existed. */
 static void snap_delete_old(void) {
-    u8 jb[8192]; u32 jsize = 0;
-    if (fs_read("rollback.txt", jb, sizeof(jb) - 1, &jsize) != 0) {
+    u8 *jb = snap_del_jb; u32 jsize = 0;
+    if (fs_read("rollback.txt", jb, sizeof(snap_del_jb) - 1, &jsize) != 0) {
         fs_delete("rollback.txt"); fs_delete("rb_packages.txt");
         return;
     }
@@ -808,12 +824,12 @@ static int snap_take(void) {
     }
     /* Journal: reg flag, F entries (existed), D entries (new). */
     {
-        char jb[8192]; u32 ji = 0;
+        char *jb = snap_take_jb; u32 ji = 0;
         jb[ji++] = 'r'; jb[ji++] = 'e'; jb[ji++] = 'g'; jb[ji++] = ':';
         jb[ji++] = snap_reg_existed ? '1' : '0'; jb[ji++] = '\n';
         for (int i = 0; i < snap_count; i++) {
             const char *s;
-            if (ji > sizeof(jb) - 80) goto fail;
+            if (ji > sizeof(snap_take_jb) - 80) goto fail;
             jb[ji++] = 'F'; jb[ji++] = '|';
             s = snap_entries[i].orig; while (*s) jb[ji++] = *s++;
             jb[ji++] = '|';
@@ -824,7 +840,7 @@ static int snap_take(void) {
             for (int f = 0; f < upd_pkgs[i].m.nfiles; f++)
                 if (!snap_have(upd_pkgs[i].m.files[f].name)) {
                     const char *s;
-                    if (ji > sizeof(jb) - 80) goto fail;
+                    if (ji > sizeof(snap_take_jb) - 80) goto fail;
                     jb[ji++] = 'D'; jb[ji++] = '|';
                     s = upd_pkgs[i].m.files[f].name; while (*s) jb[ji++] = *s++;
                     jb[ji++] = '\n';
@@ -843,8 +859,8 @@ fail:
    partial failure the snapshot is left in place so sysrollback
    can be retried. Does not delete the snapshot itself. */
 static int snap_restore(void) {
-    u8 jb[8192]; u32 jsize = 0;
-    if (fs_read("rollback.txt", jb, sizeof(jb) - 1, &jsize) != 0) {
+    u8 *jb = snap_restore_jb; u32 jsize = 0;
+    if (fs_read("rollback.txt", jb, sizeof(snap_restore_jb) - 1, &jsize) != 0) {
         console_write("sysrollback: no update snapshot found\n"); return -1;
     }
     jb[jsize] = 0;
@@ -1419,6 +1435,36 @@ int pkg_repo_avail(void) {
         if (pkg_repo_browse_entry(i, name, version) != 0) break;
         console_printf("%s %s\n", name, version);
     }
+    return 0;
+}
+
+/* Linux-comparability run: substring search over the same
+   downloaded index pkg avail reads (no network, no new
+   channel). */
+int pkg_repo_search(const char *pattern) {
+    u32 ver = 0;
+    int n = pkg_repo_browse_load(&ver);
+    if (n < 0) {
+        console_write("(no index downloaded - run pkg update from the shell)\n");
+        return 0;
+    }
+    int found = 0;
+    for (int i = 0; i < n; i++) {
+        char name[32], version[16];
+        if (pkg_repo_browse_entry(i, name, version) != 0) break;
+        /* Substring match, case-sensitive (same rule as find). */
+        int plen = 0; while (pattern[plen]) plen++;
+        int nlen = 0; while (name[nlen]) nlen++;
+        int hit = 0;
+        if (plen == 0) hit = 1;
+        for (int s = 0; s + plen <= nlen && !hit; s++) {
+            int eq = 1;
+            for (int k = 0; k < plen; k++) if (name[s + k] != pattern[k]) eq = 0;
+            if (eq) hit = 1;
+        }
+        if (hit) { console_printf("%s %s\n", name, version); found++; }
+    }
+    if (found == 0) console_printf("(no packages matching %s)\n", pattern);
     return 0;
 }
 

@@ -15,9 +15,16 @@ struct tss_entry {
     u32 es, cs, ss, ds, fs, gs, ldt, trap, iomap_base;
 } __attribute__((packed));
 
-static struct gdt_entry gdt[6];
+static struct gdt_entry gdt[7];
 struct gdt_ptr gdt_ptr;
 static struct tss_entry tss;
+/* SMP (redesign 4): the AP needs its own TSS, because a ring-3 ->
+   ring-0 transition loads SS:ESP from the CURRENT task register's
+   TSS — with one TSS, the BSP and AP would overwrite each
+   other's esp0 on every switch and syscalls would land on the
+   wrong kernel stack. Entry 6 -> selector 0x30, loaded by the
+   AP in ap_main (ltr). */
+static struct tss_entry tss_ap;
 extern void gdt_flush(void);
 
 static void gdt_set(int i, u32 base, u32 limit, u8 access, u8 gran) {
@@ -30,6 +37,12 @@ static void gdt_set(int i, u32 base, u32 limit, u8 access, u8 gran) {
 }
 
 void tss_set_esp0(u32 esp0) { tss.esp0 = esp0; }
+void tss_set_esp0_ap(u32 esp0) { tss_ap.esp0 = esp0; }
+
+void gdt_ptr_values(u16 *limit_out, u32 *base_out) {
+    if (limit_out) *limit_out = gdt_ptr.limit;
+    if (base_out) *base_out = gdt_ptr.base;
+}
 
 void gdt_init(void) {
     gdt_set(0, 0, 0, 0, 0);
@@ -41,6 +54,10 @@ void gdt_init(void) {
     tss.ss0 = 0x10;
     tss.iomap_base = sizeof(tss);
     gdt_set(5, (u32)&tss, sizeof(tss) - 1, 0x89, 0x00); /* TSS -> 0x28 */
+    memset(&tss_ap, 0, sizeof(tss_ap));
+    tss_ap.ss0 = 0x10;
+    tss_ap.iomap_base = sizeof(tss_ap);
+    gdt_set(6, (u32)&tss_ap, sizeof(tss_ap) - 1, 0x89, 0x00); /* AP TSS -> 0x30 */
     gdt_ptr.limit = (u16)(sizeof(gdt) - 1);
     gdt_ptr.base = (u32)&gdt;
     gdt_flush();

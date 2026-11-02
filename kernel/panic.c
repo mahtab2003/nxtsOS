@@ -3,6 +3,10 @@
 #include "console.h"
 
 void panic(const char *msg) {
+    /* Bypass the console spinlock first: a panic raised while
+       this CPU holds it (a fault inside console output) must
+       still print instead of spinning forever. */
+    console_set_panic_mode();
     /* A panic during a desktop session must still reach the screen:
        the desktop suppresses framebuffer console output (Bug C fix),
        so clear the suppression and repaint the text console first. */

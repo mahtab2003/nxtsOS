@@ -42,6 +42,13 @@ segment. Login retries on "Login incorrect" at most twice
 per user per boot (a third recorded failure would lock the
 account, and a third failed attempt in one login loop halts
 the machine).
+Parity-run hardening: cmd() now uses the echo-aware verified
+sender (the old send_text only noticed "Unknown command", so
+a doubled key inside an argument silently ran the wrong
+command — e.g. a corrupted "userdel alice" left fails.txt
+unchanged and the drop check failed downstream); the drop
+check itself is line-based (content lines only, not a
+substring over the whole segment).
 Exit 0 only if all checks pass.
 Usage: python3 tests/qemu_test_core_users.py <iso> <workdir>
 <workdir> is created by tests/qemu_test_core_users_setup.py.
@@ -52,7 +59,12 @@ BLANK = os.path.join(WORK, "blank.img")
 ADMIN = os.path.join(WORK, "admin.img")
 SERIAL = os.path.join(WORK, "serial.log")
 MON = os.path.join(WORK, "mon.sock")
-KEYMAP = {" ": "spc", ".": "dot", "-": "minus", "_": "shift-minus", ":": "shift-semicolon"}
+KEYMAP = {" ": "spc", ".": "dot", "-": "minus", "_": "shift-minus", ":": "shift-semicolon",
+          "/": "slash", "%": "shift-5"}
+for _c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+    KEYMAP[_c] = "shift-" + _c.lower()
+KEYMAP.update({"$": "shift-4", "!": "shift-1", "'": "apostrophe",
+               '"': "shift-apostrophe", "=": "equal"})
 
 def log_text():
     try: return open(SERIAL, errors="replace").read()
@@ -105,16 +117,53 @@ def send_text(s, txt):
         if "Unknown command" not in log_text()[before:]:
             break
 
+def _current_line(t):
+    # Current shell line: text after the last prompt, with
+    # backspaces interpreted and job output (a newline) resetting
+    # the line — the parity-suite verified-sender pattern.
+    idx = t.rfind("@nxts> ")
+    raw = t[idx + len("@nxts> "):] if idx >= 0 else ""
+    out = []
+    for ch in raw:
+        if ch == "\b":
+            if out: out.pop()
+        elif ch == "\n" or ch == "\r":
+            out = []
+        else:
+            out.append(ch)
+    return "".join(out)
+
+def send_verified(s, txt):
+    # Echo-verified send: type, check the echo matches exactly
+    # (catches a dropped/doubled key, including inside an
+    # argument, where the old send_text only noticed "Unknown
+    # command"), erase and retype between attempts, and on the
+    # final attempt submit anyway so a failure is loud (an
+    # "Unknown command" line) instead of silently never run.
+    for _attempt in range(3):
+        for ch in txt:
+            s.sendall(f"sendkey {KEYMAP.get(ch, ch)}\n".encode()); time.sleep(0.15)
+        time.sleep(0.5)
+        if _current_line(log_text()) == txt:
+            s.sendall(b"sendkey ret\n"); time.sleep(1)
+            return True
+        if _attempt < 2:
+            for _ in range(len(txt) + 2):
+                s.sendall(b"sendkey backspace\n"); time.sleep(0.1)
+            time.sleep(0.5)
+    s.sendall(b"sendkey ret\n"); time.sleep(1)
+    return False
+
 def cmd(s, txt, user):
     before = POS[0]
-    send_text(s, txt)
-    if not wait_from(f"{user}@nxts> ", 30, f"prompt after {txt}"):
-        return None
-    seg = log_text()[before:POS[0]]
-    if "Unknown command" in seg:
-        if not wait_from(f"{user}@nxts> ", 30, f"retry prompt after {txt}"):
+    send_verified(s, txt)
+    seg = None
+    for _ in range(3):
+        if not wait_from(f"{user}@nxts> ", 30, f"prompt after {txt}"):
             return None
         seg = log_text()[before:POS[0]]
+        if f"{txt}\n" in seg:
+            break
     return seg
 
 FAILS = {}
@@ -408,7 +457,17 @@ try:
     seg = cmd(s, "userdel alice", "admin")
     check(seg is not None and "Deleted user alice" in seg, "admin deletes alice")
     seg = cmd(s, "cat fails.txt", "admin")
-    check(seg is not None and "alice" not in seg, "fails record dropped on delete")
+    # Line-based drop check (parity-run hardening): the old
+    # substring check ("alice" not in seg) could false-positive
+    # on any stray mention anywhere in the segment; a fails.txt
+    # record IS one line, so only content lines count. Content
+    # lines = seg lines minus the typed-echo first line and the
+    # trailing prompt fragment.
+    lines = []
+    if seg is not None:
+        parts = seg.split("\n")
+        lines = parts[1:-1] if len(parts) >= 2 else []
+    check(seg is not None and not any("alice" in ln for ln in lines), "fails record dropped on delete")
     seg = useradd(s, "alice", "pwalice2", "admin", 1000)
     check(seg is not None and "uid=1000 " in seg, "re-add alice")
     seg = logout(s, "admin")

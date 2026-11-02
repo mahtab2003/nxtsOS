@@ -1,11 +1,14 @@
 # nxtsOS Project Status
 
-- Current version: 1.0.0 — Phase 11 hardening, update and verified
-  release (RSA-2048 package signatures, system update with snapshot +
-  rollback, signed remote package repo, full adversarial review).
-  Git tag v1.0.0, commit 44ee3c7. The working tree holds post-v1.0.0
-  changes that are uncommitted and unreleased: no new version, tag, or
-  archives exist until a release is cut.
+- Current version: 1.1.6 — accumulation release (Linux-comparability
+  + deep-core + all five core redesigns: VFS/directories, block
+  layer, sockets + TCP server, SMP stabilised, redesign 5 paging/
+  vruntime/capabilities). Git tag v1.1.6 (local only; no GitHub
+  push). Release ISO 5,687,296 bytes, SHA-256
+  2f53912c3985200d4ceaff4c5354c62dd87624bdabee4070868b8e285813871d.
+  Full gate 120/120 suites PASS — see releases/v1.1.6/TEST_REPORT.md
+  and SECURITY_REPORT.md. (Supersedes the 1.0.0 line above and the
+  v1.1.5 release, which was the previous shipped version.)
 - CORRECTION: this file used to say "Current version: 0.2.0 — Phase 3
   complete" and "Next: Phase 4 graphics/input". Phases 4–11 have all
   shipped since: persistent storage (Phase 4, v0.3.0), loader/security/

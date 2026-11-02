@@ -7,8 +7,12 @@ Creates:
      blank-disk boot, since boots mutate it.
   seed.img — users.txt (alice uid 1000, password pwalice,
      fixed salt) + tab.txt ("a<TAB>b", alice-owned 644) +
-     big.txt (33000 bytes, root-owned 644: readable, so the
-     size refusal is reached) + long.txt (one 1100-char line,
+     big.txt (131073 bytes, root-owned 644: readable, so the
+     size refusal is reached — one byte over the 128 KiB cap) +
+     mid.txt (100000 bytes, alice-owned 644: under the cap, so
+     it must load and save round-trip) +
+     undo.txt ("line1\nline2\n", alice-owned 644: cut-undo
+     fixture) + long.txt (one 1100-char line,
      alice-owned 644: over the 1024-byte cut cap) +
      secret.txt (root-owned 600: alice cannot read it).
 """
@@ -30,7 +34,11 @@ run(["python3", os.path.join(ROOT, "tools", "mkuser.py"),
 with open(os.path.join(WORK, "tab.txt"), "wb") as f:
     f.write(b"a\tb\n")
 with open(os.path.join(WORK, "big.txt"), "wb") as f:
-    f.write(b"x" * 33000)
+    f.write(b"x" * 131073)
+with open(os.path.join(WORK, "mid.txt"), "wb") as f:
+    f.write(b"y" * 100000)
+with open(os.path.join(WORK, "undo.txt"), "wb") as f:
+    f.write(b"line1\nline2\n")
 with open(os.path.join(WORK, "long.txt"), "wb") as f:
     f.write(b"L" * 1100 + b"\n")
 with open(os.path.join(WORK, "secret.txt"), "wb") as f:
@@ -40,6 +48,8 @@ run(["python3", os.path.join(ROOT, "tools", "mkdisk.py"),
      "--add", f"users.txt:{os.path.join(WORK, 'users.txt')}:600:0",
      "--add", f"tab.txt:{os.path.join(WORK, 'tab.txt')}:644:1000",
      "--add", f"big.txt:{os.path.join(WORK, 'big.txt')}:644:0",
+     "--add", f"mid.txt:{os.path.join(WORK, 'mid.txt')}:644:1000",
+     "--add", f"undo.txt:{os.path.join(WORK, 'undo.txt')}:644:1000",
      "--add", f"long.txt:{os.path.join(WORK, 'long.txt')}:644:1000",
      "--add", f"secret.txt:{os.path.join(WORK, 'secret.txt')}:600:0"])
 print("core_edit test fixtures ready in", WORK)
