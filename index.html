@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nxtsOS — An Operating System Built From Scratch</title>
+<meta name="description" content="nxtsOS is an operating system with its own kernel, written in C and assembly. Not a Linux distribution, not a Linux fork. CLI-first, secure, and built in the open.">
+<style>
+  :root { --ink:#1a1a1a; --muted:#555; --line:#ddd; --accent:#1f4e79; --bg:#fdfdfb; --card:#fff; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family: Georgia, 'Times New Roman', serif; color:var(--ink); background:var(--bg); line-height:1.6; }
+  header { border-bottom:3px double var(--ink); padding:2.5rem 1rem 2rem; text-align:center; }
+  header h1 { margin:0; font-size:3rem; letter-spacing:.04em; }
+  header p.tag { font-size:1.25rem; color:var(--muted); margin:.5rem 0 0; }
+  nav { text-align:center; padding:.75rem 1rem; border-bottom:1px solid var(--line); font-family: Arial, Helvetica, sans-serif; font-size:.95rem; }
+  nav a { color:var(--accent); margin:0 .75rem; text-decoration:none; }
+  nav a:hover { text-decoration:underline; }
+  main { max-width:760px; margin:0 auto; padding:1.5rem 1rem 3rem; }
+  h2 { font-size:1.5rem; border-bottom:1px solid var(--line); padding-bottom:.25rem; margin-top:2.5rem; }
+  h3 { margin-bottom:.25rem; }
+  p, li { font-size:1.05rem; }
+  .lead { font-size:1.2rem; }
+  .card { background:var(--card); border:1px solid var(--line); padding:1rem 1.25rem; margin:1rem 0; }
+  .facts { display:grid; grid-template-columns:1fr 1fr; gap:1rem; }
+  .facts div { border:1px solid var(--line); padding:.75rem 1rem; }
+  .facts dt { font-family: Arial, Helvetica, sans-serif; font-size:.85rem; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); }
+  .facts dd { margin:.25rem 0 0; }
+  .buttons { text-align:center; margin:2rem 0; }
+  .buttons a { display:inline-block; font-family: Arial, Helvetica, sans-serif; background:var(--accent); color:#fff; padding:.7rem 1.4rem; margin:.25rem; text-decoration:none; border-radius:3px; }
+  .buttons a.secondary { background:#fff; color:var(--accent); border:1px solid var(--accent); }
+  .note { font-size:.95rem; color:var(--muted); }
+  footer { border-top:1px solid var(--line); text-align:center; padding:1.5rem 1rem; color:var(--muted); font-size:.95rem; }
+  @media (max-width:600px) {
+    header h1 { font-size:2.1rem; }
+    header p.tag { font-size:1.05rem; }
+    .facts { grid-template-columns:1fr; }
+    nav a { display:inline-block; margin:.25rem .5rem; }
+    main { padding:1rem; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>nxtsOS</h1>
+  <p class="tag">An operating system built from scratch — its own kernel, not a Linux fork.</p>
+</header>
+<nav>
+  <a href="#what">What it is</a>
+  <a href="#today">Today</a>
+  <a href="#roadmap">Roadmap</a>
+  <a href="#status">Status</a>
+  <a href="#get">Get it</a>
+</nav>
+<main>
+  <section id="what">
+    <h2>What is nxtsOS?</h2>
+    <p class="lead">nxtsOS is a complete operating system written from the ground up: its own kernel, its own filesystem, its own shell, its own networking stack — in C and assembly, on 32-bit x86 today, with a 64-bit build on the roadmap.</p>
+    <p>It is <strong>not</strong> a Linux distribution and <strong>not</strong> a Linux fork. It aims to be <em>comparable</em> to Linux in capability — the same everyday tools, services, and security discipline — while remaining its own system, built and verified in the open, one release at a time.</p>
+    <p>The design is CLI-first: a full command line, real services, and a signed package system come before any graphical desktop. A text interface (TUI) is planned as an optional package, not as part of the core system.</p>
+  </section>
+
+  <section>
+    <h2>At a glance</h2>
+    <dl class="facts">
+      <div><dt>Kernel</dt><dd>Own kernel, C + assembly</dd></div>
+      <div><dt>Architecture</dt><dd>32-bit x86 (64-bit planned)</dd></div>
+      <div><dt>Interface</dt><dd>Command line first</dd></div>
+      <div><dt>Current release</dt><dd>v1.1.6</dd></div>
+      <div><dt>Filesystem</dt><dd>nxtsFS, with VFS directories</dd></div>
+      <div><dt>Packages</dt><dd>Signed packages, update + rollback</dd></div>
+    </dl>
+  </section>
+
+  <section id="today">
+    <h2>What it can do today (v1.1.6)</h2>
+    <div class="card">
+      <h3>Core system</h3>
+      <ul>
+        <li>Preemptive multitasking, demand paging, and SMP on up to 2 CPUs</li>
+        <li>Virtual filesystem with directories, hard links, and permission-gated traversal</li>
+        <li>Users, groups, sudo, and capability bits — with a real audit trail</li>
+        <li>Shell with jobs, pipes, redirection, scripting, and grouped help</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>Networking &amp; security</h3>
+      <ul>
+        <li>Ethernet, DHCP, DNS, TCP sockets and a TCP server</li>
+        <li>HTTPS with TLS 1.3 (plus opt-in legacy TLS for old servers only)</li>
+        <li>Firewall, signed package repository, and system updates with rollback</li>
+        <li>Installer that partitions, formats, and installs the system on disk</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>Everyday tools</h3>
+      <ul>
+        <li>Terminal editor, file and text tools, process view, and resource reporting</li>
+        <li>Linux-like layout: /bin, /sbin, /etc, /home, /usr, /var/log, /tmp</li>
+        <li>Service manager with dependencies, supervision, and boot services</li>
+      </ul>
+    </div>
+  </section>
+
+  <section id="roadmap">
+    <h2>Where it is going</h2>
+    <p>Development continues in phases toward <strong>v1.1.7</strong>, the next release. In order:</p>
+    <ol>
+      <li>Firewall as a telemetry escape (egress allowlist + signed blocklist)</li>
+      <li>Download tools, a live process monitor, and proper memory-failure reporting</li>
+      <li>Login sessions, then a 64-bit x86 kernel build</li>
+      <li>Full-capability utilities, clean release builds, completed packages, flexible resolutions, and complete guides</li>
+      <li>Date and time management, a TUI <em>package</em>, scheduling and logging</li>
+      <li>Core, networking, hardware, and security parity with Linux — staged, device by device</li>
+      <li>Developer parity: archives, an on-OS toolchain, and complete manual pages</li>
+    </ol>
+    <p class="note">No release is cut until its full regression and security checks pass on the final image.</p>
+  </section>
+
+  <section id="status">
+    <h2>Honest status</h2>
+    <p>nxtsOS is tested under QEMU, with a full regression suite run on every release image. It has <strong>not</strong> yet been tested on real hardware, and some features are honestly documented as inactive rather than claimed — for example, swap space and real-time scheduler classes are defined but not active, and the mandatory-access-control check is currently an explicit no-op hook, never described as enforcement.</p>
+    <p>That honesty is part of the project: a feature is only called done when it has actually been verified.</p>
+  </section>
+
+  <section id="get">
+    <h2>Get nxtsOS</h2>
+    <div class="buttons">
+      <a href="https://github.com/mahtab2003/nxtsOS">View on GitHub</a>
+      <a class="secondary" href="https://github.com/mahtab2003/nxtsOS/releases/tag/v1.1.6">Download v1.1.6</a>
+    </div>
+    <p class="note">Source code, release history from v0.1.0, and issue tracking live on GitHub. The project is developed in the open — contributions and honest bug reports are welcome there.</p>
+  </section>
+</main>
+<footer>
+  <p>nxtsOS — built from scratch, verified before it is claimed.</p>
+</footer>
+</body>
+</html>
